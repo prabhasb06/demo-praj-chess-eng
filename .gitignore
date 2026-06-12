@@ -1,0 +1,18 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Build outputs
+build/
+dist/
+*.spec
+
+# Large binaries and executables
+stockfish.exe
+uci_engine.exe
+
+# Local IDE/editor settings
+.vscode/
+.idea/
+.DS_Store
