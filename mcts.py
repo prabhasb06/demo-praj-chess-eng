@@ -145,8 +145,9 @@ class StockfishEvaluator(EvaluatorBase):
         try:
             self.engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
         except Exception as e:
-            print(f"[Warning] Could not load Stockfish engine at '{stockfish_path}': {e}.")
-            print("Falling back to a material heuristic evaluator.")
+            import sys
+            print(f"[Warning] Could not load Stockfish engine at '{stockfish_path}': {e}.", file=sys.stderr)
+            print("Falling back to a material heuristic evaluator.", file=sys.stderr)
 
     def evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
         # If Stockfish engine is not loaded, fallback to material heuristics

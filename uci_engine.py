@@ -6,14 +6,20 @@ Exposes advanced MCTS configurations directly to GUI sliders and settings (setop
 """
 
 import sys
+import os
 import chess
 import numpy as np
 from mcts import MCTS, StockfishEvaluator
 from board_encoder import decode_move
 
 def main():
-    # Initial settings
-    stockfish_path = "stockfish.exe"
+    # Resolve Stockfish path relative to the executable or script directory
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    stockfish_path = os.path.join(base_dir, "stockfish.exe")
+
     stockfish_depth = 5
     stockfish_time_limit = 0.005
     num_simulations = 400
