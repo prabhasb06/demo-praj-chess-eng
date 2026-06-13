@@ -355,7 +355,7 @@ public:
             }
 
             // 3. Backpropagation
-            float back_val = val;
+            float back_val = -val;
             while (node) {
                 node->visit_count++;
                 node->total_value += back_val;

@@ -348,6 +348,8 @@ class MCTS:
                     # Output standard UCI info string
                     print(f"info depth {depth} score cp {score_cp} nodes {i+1} nps {nps} time {time_ms} pv {pv_str}")
                     sys.stdout.flush()
+        
+        return root
 
     def _simulate(self, root: MCTSNode, board: chess.Board):
         """Performs a single simulation: selection, expansion, evaluation, and backpropagation."""
@@ -383,6 +385,8 @@ class MCTS:
         # Backpropagation
         # The value returned is for the player whose turn it is on the leaf board.
         # We must invert the value at each step up because the players alternate turns.
+        # Start by inverting the value so that each node stores value from the parent's perspective.
+        value = -value
         for n in reversed(search_path):
             n.remove_virtual_loss()
             n.update(value)
