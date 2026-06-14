@@ -62,7 +62,7 @@ class MCTSNode:
 
         return best_action, best_child
 
-    def expand(self, action_priors: np.ndarray, legal_mask: np.ndarray):
+    def expand(self, action_priors: np.ndarray, legal_mask: np.ndarray, board: chess.Board):
         """
         Expands the node by creating children for all legal actions.
         action_priors: Array of size 4096 containing the moves' probabilities.
@@ -70,10 +70,8 @@ class MCTSNode:
         for action in range(4096):
             if legal_mask[action]:
                 prior = action_priors[action]
-                # Reconstruct move from action
-                from_sq = action // 64
-                to_sq = action % 64
-                move = chess.Move(from_sq, to_sq)
+                # Reconstruct move from action using decode_move to handle promotions correctly
+                move = decode_move(action, board)
                 self.children[action] = MCTSNode(prior=prior, parent=self, move=move)
 
     def add_virtual_loss(self):
@@ -299,7 +297,7 @@ class MCTS:
             policy = policy * legal_mask
             policy = policy / np.sum(policy)
 
-        root.expand(policy, legal_mask)
+        root.expand(policy, legal_mask, board)
 
         # 2. Run simulations
         start_time = time.time()
@@ -381,7 +379,7 @@ class MCTS:
             # Expansion & Evaluation
             policy, value = self._get_evaluation(board)
             legal_mask = get_legal_move_mask(board)
-            node.expand(policy, legal_mask)
+            node.expand(policy, legal_mask, board)
 
         # Backpropagation
         # The value returned is for the player whose turn it is on the leaf board.
