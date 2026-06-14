@@ -127,9 +127,80 @@ class NeuralNetEvaluator(EvaluatorBase):
 
         return policy_probs, value
 
+class SubprocessStockfish:
+    """A lightweight, synchronous, and robust wrapper for Stockfish via subprocess."""
+    def __init__(self, path: str):
+        self.path = path
+        self.proc = None
+        self.start()
+
+    def start(self):
+        import subprocess
+        import sys
+        try:
+            self.proc = subprocess.Popen(
+                [self.path],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1
+            )
+            self.send("uci")
+            self.read_until("uciok")
+            self.send("isready")
+            self.read_until("readyok")
+        except Exception as e:
+            print(f"[Warning] Failed to start Stockfish process at {self.path}: {e}", file=sys.stderr)
+            self.proc = None
+
+    def send(self, cmd: str):
+        if self.proc and self.proc.stdin:
+            try:
+                self.proc.stdin.write(cmd + "\n")
+                self.proc.stdin.flush()
+            except Exception:
+                pass
+
+    def read_until(self, expected: str) -> List[str]:
+        lines = []
+        if not self.proc or not self.proc.stdout:
+            return lines
+        while True:
+            try:
+                line = self.proc.stdout.readline()
+                if not line:
+                    break
+                stripped = line.strip()
+                lines.append(stripped)
+                if stripped.startswith(expected):
+                    break
+            except Exception:
+                break
+        return lines
+
+    def evaluate_position(self, board: chess.Board, depth: int, multipv: int = 3) -> List[str]:
+        self.send(f"setoption name MultiPV value {multipv}")
+        self.send(f"position fen {board.fen()}")
+        self.send(f"go depth {depth}")
+        return self.read_until("bestmove")
+
+    def close(self):
+        if self.proc:
+            try:
+                self.send("quit")
+                self.proc.wait(timeout=1)
+            except:
+                try:
+                    self.proc.kill()
+                except:
+                    pass
+            self.proc = None
+
+
 class StockfishEvaluator(EvaluatorBase):
     """
-    Evaluates positions using a local Stockfish binary via UCI commands.
+    Evaluates positions using a local Stockfish binary via synchronous subprocess UCI commands.
     Used for Stockfish-guided MCTS (Hybrid mode), avoiding any training or heavy overhead.
     """
     def __init__(self, stockfish_path: str = "stockfish", depth: int = 5, time_limit: float = 0.005):
@@ -140,42 +211,91 @@ class StockfishEvaluator(EvaluatorBase):
         self.lock = threading.Lock()
         
         # Try to launch engine
-        try:
-            self.engine = chess.engine.SimpleEngine.popen_uci(self.stockfish_path)
-        except Exception as e:
+        self.engine = SubprocessStockfish(self.stockfish_path)
+        if self.engine.proc is None:
             import sys
-            print(f"[Warning] Could not load Stockfish engine at '{stockfish_path}': {e}.", file=sys.stderr)
-            print("Falling back to a material heuristic evaluator.", file=sys.stderr)
+            print(f"[Warning] Could not load Stockfish engine. Falling back to a material heuristic evaluator.", file=sys.stderr)
+            self.engine = None
+
+    def _restart_engine(self):
+        """Restarts the Stockfish process to recover from any communication or sync errors."""
+        if self.engine is not None:
+            self.engine.close()
+        self.engine = SubprocessStockfish(self.stockfish_path)
+        if self.engine.proc is None:
+            self.engine = None
 
     def evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
         # If Stockfish engine is not loaded, fallback to material heuristics
-        if self.engine is None:
+        if self.engine is None or self.engine.proc is None:
             return self._heuristic_evaluate(board)
 
         with self.lock:
             try:
-                # Run quick analysis
-                analysis = self.engine.analyse(board, chess.engine.Limit(depth=self.depth, time=self.time_limit), multipv=3)
+                # Query Stockfish synchronously
+                lines = self.engine.evaluate_position(board, self.depth, multipv=3)
                 
-                # Get the main evaluation score
-                main_eval = analysis[0]["score"].relative
-                # Convert score to centipawns or mate steps
-                cp = main_eval.score(mate_score=10000)
+                # Parse lines
+                move_scores_dict = {}
+                best_eval = 0
+                best_eval_set = False
+                
+                for line in lines:
+                    if line.startswith("info"):
+                        tokens = line.split()
+                        
+                        # Extract multipv
+                        multipv = 1
+                        if "multipv" in tokens:
+                            multipv_idx = tokens.index("multipv") + 1
+                            if multipv_idx < len(tokens):
+                                multipv = int(tokens[multipv_idx])
+                        
+                        # Extract score
+                        score_val = 0
+                        if "score" in tokens:
+                            score_idx = tokens.index("score") + 1
+                            if score_idx + 1 < len(tokens):
+                                score_type = tokens[score_idx] # "cp" or "mate"
+                                score_value_str = tokens[score_idx + 1]
+                                try:
+                                    score_value = int(score_value_str)
+                                    if score_type == "mate":
+                                        score_val = 10000 if score_value > 0 else -10000
+                                    else:
+                                        score_val = score_value
+                                except:
+                                    pass
+                        
+                        # Extract PV move
+                        if "pv" in tokens:
+                            pv_idx = tokens.index("pv") + 1
+                            if pv_idx < len(tokens):
+                                pv_move_str = tokens[pv_idx]
+                                try:
+                                    pv_move = chess.Move.from_uci(pv_move_str)
+                                    # Only add if it's a legal move for the current board
+                                    if pv_move in board.legal_moves:
+                                        move_scores_dict[pv_move] = score_val
+                                except:
+                                    pass
+                        
+                        # Save the score of multipv 1 as main eval
+                        if multipv == 1:
+                            best_eval = score_val
+                            best_eval_set = True
+                
+                if not best_eval_set:
+                    return self._heuristic_evaluate(board)
+
+                move_scores = list(move_scores_dict.items())
+
                 # Map score to value in [-1, 1] using tanh
-                value = math.tanh(cp / 200.0)
+                value = math.tanh(best_eval / 200.0)
 
                 # Get policy priors from moves evaluated
                 legal_mask = get_legal_move_mask(board)
                 policy_probs = np.zeros(4096, dtype=np.float32)
-
-                move_scores = []
-                for pvi in analysis:
-                    if "pv" in pvi and pvi["pv"] and "score" in pvi and pvi["score"]:
-                        pv_move = pvi["pv"][0]
-                        pv_score = pvi["score"].relative.score(mate_score=10000)
-                        if pv_score is None:
-                            pv_score = 0
-                        move_scores.append((pv_move, pv_score))
 
                 # If no scores are returned, fallback to uniform
                 if not move_scores:
@@ -205,7 +325,10 @@ class StockfishEvaluator(EvaluatorBase):
                 return policy_probs, value
 
             except Exception as e:
-                # Fallback on any communication error
+                import sys
+                print(f"[Warning] Stockfish evaluation error: {e}. Restarting Stockfish process...", file=sys.stderr)
+                sys.stderr.flush()
+                self._restart_engine()
                 return self._heuristic_evaluate(board)
 
     def _heuristic_evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
@@ -240,10 +363,7 @@ class StockfishEvaluator(EvaluatorBase):
 
     def close(self):
         if self.engine is not None:
-            try:
-                self.engine.quit()
-            except:
-                pass
+            self.engine.close()
 
 
 class MCTS:
@@ -306,6 +426,8 @@ class MCTS:
         # 2. Run simulations
         start_time = time.time()
         for i in range(self.num_simulations):
+            if getattr(self, 'abort_search', False):
+                break
             self._simulate(root, board.copy())
             
             # Print search info periodically (every 50 simulations or on completion)
@@ -373,8 +495,8 @@ class MCTS:
             n.add_virtual_loss()
 
         # Check for game end
-        if board.is_game_over():
-            outcome = board.outcome()
+        if board.is_game_over(claim_draw=True):
+            outcome = board.outcome(claim_draw=True)
             # Outcome value from active player's perspective
             if outcome.winner is None:
                 value = 0.0  # Draw
@@ -410,18 +532,31 @@ class MCTS:
         for action, child in root.children.items():
             visits[action] = child.visit_count
 
+        total_visits = np.sum(visits)
+
         if temp == 0.0:
             # Deterministic selection (max visits)
-            best_action = np.argmax(visits)
+            if total_visits == 0:
+                # Fallback if no simulations ran or all visits are 0
+                legal_mask = get_legal_move_mask(board)
+                if root.children:
+                    # Select the move with the highest prior probability
+                    best_action = max(root.children.keys(), key=lambda act: root.children[act].prior)
+                else:
+                    best_action = int(np.argmax(legal_mask)) if np.any(legal_mask) else 0
+            else:
+                best_action = np.argmax(visits)
+                
             probs = np.zeros(4096, dtype=np.float32)
             probs[best_action] = 1.0
             return probs
         else:
             # Stochastic selection (visit counts raised to 1/temp power)
-            visits = visits ** (1.0 / temp)
-            total = np.sum(visits)
-            if total == 0:
+            if total_visits == 0:
                 # Fallback if no simulations ran
                 legal_mask = get_legal_move_mask(board)
-                return legal_mask / np.sum(legal_mask)
+                return legal_mask / np.sum(legal_mask) if np.any(legal_mask) else np.ones(4096) / 4096
+                
+            visits = visits ** (1.0 / temp)
+            total = np.sum(visits)
             return visits / total
