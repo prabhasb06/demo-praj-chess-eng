@@ -170,9 +170,12 @@ class StockfishEvaluator(EvaluatorBase):
 
                 move_scores = []
                 for pvi in analysis:
-                    pv_move = pvi["pv"][0]
-                    pv_score = pvi["score"].relative.score(mate_score=10000)
-                    move_scores.append((pv_move, pv_score))
+                    if "pv" in pvi and pvi["pv"] and "score" in pvi and pvi["score"]:
+                        pv_move = pvi["pv"][0]
+                        pv_score = pvi["score"].relative.score(mate_score=10000)
+                        if pv_score is None:
+                            pv_score = 0
+                        move_scores.append((pv_move, pv_score))
 
                 # If no scores are returned, fallback to uniform
                 if not move_scores:
@@ -180,11 +183,12 @@ class StockfishEvaluator(EvaluatorBase):
                     for move in legal_moves:
                         policy_probs[encode_move(move)] = 1.0 / len(legal_moves)
                 else:
-                    # Softmax scores
+                    # Softmax scores with numerical stability
                     moves = [item[0] for item in move_scores]
                     scores = np.array([item[1] for item in move_scores], dtype=np.float32)
-                    # Shift for numerical stability
-                    scores_exp = np.exp(scores / 100.0) # temp scale of 100 centipawns
+                    # Shift for numerical stability (subtract max)
+                    scores_shifted = (scores - np.max(scores)) / 100.0  # temp scale of 100 centipawns
+                    scores_exp = np.exp(scores_shifted)
                     scores_prob = scores_exp / np.sum(scores_exp)
 
                     # Distribute most probability among evaluated PV moves
@@ -357,7 +361,10 @@ class MCTS:
 
         # Selection
         while len(node.children) > 0:
-            action, node = node.select_child(self.c_puct)
+            action, next_node = node.select_child(self.c_puct)
+            if next_node is None:
+                break
+            node = next_node
             board.push(node.move)
             search_path.append(node)
 
