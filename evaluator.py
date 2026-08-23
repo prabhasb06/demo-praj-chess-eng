@@ -6,6 +6,8 @@ Computes Elo difference and determines promotion based on win-rate benchmarks.
 
 import math
 import chess
+import numpy as np
+from typing import Tuple
 from mcts import MCTS, MCTSNode
 from board_encoder import decode_move
 

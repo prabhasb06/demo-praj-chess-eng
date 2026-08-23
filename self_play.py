@@ -8,21 +8,25 @@ import os
 import random
 import time
 from collections import deque
+from typing import List, Tuple, Optional
 import numpy as np
 import torch
 import torch.optim as optim
 import chess
 
-from board_encoder import encode_board, decode_move, get_legal_move_mask
-from neural_net import ChessNet, compute_loss
+from board_encoder import (encode_board, decode_move, get_legal_move_mask,
+                           encode_move_for_perspective)
+from neural_net import ChessNet, DEFAULT_ARCH, compute_loss
 from mcts import MCTS, NeuralNetEvaluator
 
 class ReplayBuffer:
     """
     A circular replay buffer storing historical board states, MCTS policy targets,
     and game outcome values.
+
+    Memory usage: ~2 GB at capacity=100,000 (each entry is ~20 KB).
     """
-    def __init__(self, capacity=500000):
+    def __init__(self, capacity=100000):
         self.buffer = deque(maxlen=capacity)
 
     def add(self, state: np.ndarray, policy: np.ndarray, value: float, moves_left: float):
@@ -46,6 +50,17 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
+def _mirror_policy(policy: np.ndarray) -> np.ndarray:
+    """Mirror a 4096-element policy vector from original action space to mirrored action space."""
+    mirrored = np.zeros(4096, dtype=np.float32)
+    for action in range(4096):
+        if policy[action] > 0:
+            from_sq = chess.square_mirror(action // 64)
+            to_sq = chess.square_mirror(action % 64)
+            mirrored[from_sq * 64 + to_sq] = policy[action]
+    return mirrored
+
+
 def play_game(mcts: MCTS, temp_threshold: int = 30) -> List[Tuple[np.ndarray, np.ndarray, float, int]]:
     """
     Generates a single self-play game.
@@ -60,20 +75,26 @@ def play_game(mcts: MCTS, temp_threshold: int = 30) -> List[Tuple[np.ndarray, np
     game_history = []
     
     move_count = 0
-    while not board.is_game_over() and move_count < 200: # Cap at 200 moves to prevent infinite games
+    while not board.is_game_over() and move_count < 200:  # Cap at 200 moves to prevent infinite games
         # Temperature schedule
         temp = 1.0 if move_count < temp_threshold else 0.0
         
-        # Run search to get move probabilities
+        # Run search to get move probabilities (in original/unmirrored action space)
         # MCTS handles board perspective internally
         policy = mcts.get_move_probs(board, temp=temp)
         
         # Save encoding of the current state and policy
         # Always encode board from active player's perspective
         encoded_state = encode_board(board)
-        game_history.append((encoded_state, policy, board.turn, move_count))
+
+        # Mirror the policy for Black so it aligns with the mirrored board encoding.
+        # The NN sees a mirrored board for Black, so training targets must also be mirrored.
+        is_black = (board.turn == chess.BLACK)
+        training_policy = _mirror_policy(policy) if is_black else policy
+
+        game_history.append((encoded_state, training_policy, board.turn, move_count))
         
-        # Select action
+        # Select action (in original action space for board.push)
         action = np.random.choice(4096, p=policy)
         move = decode_move(action, board)
         
@@ -134,30 +155,44 @@ def train_step(model: torch.nn.Module, optimizer: optim.Optimizer,
     return loss.item()
 
 
-def run_self_play_training(model_path: str = "best_model.pt", num_games: int = 5, 
-                             num_epochs: int = 2, batch_size: int = 16, 
-                             num_sims: int = 10):
+def run_self_play_training(model_path: str = "best_model.pt",
+                           out_path: Optional[str] = None,
+                           num_games: int = 5,
+                           num_epochs: int = 2, batch_size: int = 16,
+                           num_sims: int = 10):
     """
     Orchestrates a small, lightweight self-play and training loop.
     Default arguments are scaled down to run fast and safely on any machine.
+
+    Args:
+        model_path: Checkpoint to load weights from (created if missing).
+        out_path: Where to save the trained model. Defaults to model_path.
+                  The training pipeline passes a separate path so the
+                  candidate differs from the incumbent best model.
+        num_games: Number of self-play games to generate.
+        num_epochs: Training epochs over sampled batches.
+        batch_size: Mini-batch size (clamped to the buffer size).
+        num_sims: MCTS simulations per move during self-play.
     """
+    if out_path is None:
+        out_path = model_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Starting self-play loop on device: {device} (scaled parameters for safety).")
-    
-    # Initialize network
-    # We construct a smaller network for speed if we don't have weights
+
+    # Initialize network using the shared architecture constants so every
+    # component (pipeline, self-play, evaluation) builds compatible models.
     if os.path.exists(model_path):
         print(f"Loading existing network from {model_path}")
-        model = ChessNet(num_blocks=10, filters=128)
+        model = ChessNet(**DEFAULT_ARCH)
         model.load_state_dict(torch.load(model_path, map_location=device))
     else:
-        print("Creating a lightweight 10-block model.")
-        model = ChessNet(num_blocks=10, filters=128)
+        print(f"Creating a new {DEFAULT_ARCH['num_blocks']}-block model.")
+        model = ChessNet(**DEFAULT_ARCH)
     model.to(device)
 
     evaluator = NeuralNetEvaluator(model, device=device)
     mcts = MCTS(evaluator=evaluator, c_puct=1.5, num_simulations=num_sims)
-    buffer = ReplayBuffer(capacity=1000)
+    buffer = ReplayBuffer(capacity=100000)
     optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=1e-4)
 
     # Data generation
@@ -174,11 +209,11 @@ def run_self_play_training(model_path: str = "best_model.pt", num_games: int = 5
             states, policies, values, moves = buffer.sample_batch(batch_size)
             loss_val = train_step(model, optimizer, states, policies, values, moves, device=device)
             print(f"  Epoch {epoch+1}/{num_epochs} Loss: {loss_val:.4f}")
-        
-        # Save check point
-        torch.save(model.state_dict(), model_path)
-        print(f"Model saved to {model_path}")
+
+        # Save checkpoint to out_path (NOT necessarily overwriting model_path)
+        torch.save(model.state_dict(), out_path)
+        print(f"Model saved to {out_path}")
     else:
         print("Not enough data to train. Increase num_games or batch_size.")
-    
+
     print("Lightweight self-play cycle complete.")

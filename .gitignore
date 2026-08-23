@@ -9,10 +9,34 @@ dist/
 *.spec
 
 # Large binaries and executables
-stockfish.exe
-uci_engine.exe
+*.exe
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+
+# Logs
+*.log
+
+# Python virtual environments
+venv/
+.venv/
+.env/
+env/
+
+# Training data and models
+models/
+data/
 
 # Local IDE/editor settings
 .vscode/
 .idea/
 .DS_Store
+Thumbs.db
+
+# OS files
+Contacts/
+
+# Misc
+input.txt

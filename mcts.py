@@ -1,23 +1,38 @@
 """
 MODULE 3: mcts.py
 Implements Monte Carlo Tree Search (MCTS) enhanced with neural policy/value heads,
-virtual loss for parallel search, Dirichlet noise for exploration, and a Stockfish-guided evaluator.
+Dirichlet noise for exploration, an LRU transposition cache, optional wall-clock
+deadlines, and a Stockfish-guided evaluator.
+
+Note: simulations run serially on a single thread (the UCI worker pool is
+single-worker). There is intentionally no virtual-loss/lock machinery — it was
+dead overhead in a serial search.
 """
 
 import math
 import random
-import threading
+import sys
+import time
+from collections import OrderedDict
 from typing import Dict, Tuple, List, Optional
 import numpy as np
 import chess
-import chess.engine
 
-from board_encoder import encode_board, encode_move, decode_move, get_legal_move_mask, mirror_move
+from board_encoder import (encode_board, encode_move, encode_move_for_perspective,
+                           decode_move, decode_move_for_perspective,
+                           get_legal_move_mask, get_legal_move_mask_for_perspective,
+                           mirror_move)
+
+# Maximum number of cached (policy, value) evaluations. Each entry is a 4096-float
+# policy (~16 KB), so this bounds cache memory at roughly 1 GB worst case; in
+# practice far less because entries are reused across moves within a game.
+MAX_TT_ENTRIES = 32768
+
 
 class MCTSNode:
     """
     Represents a single node in the MCTS tree.
-    Tracks visit counts, total values, mean values, prior probabilities, and virtual loss.
+    Tracks visit counts, total values, mean values and prior probabilities.
     """
     def __init__(self, prior: float, parent: Optional['MCTSNode'] = None, move: Optional[chess.Move] = None):
         self.parent = parent
@@ -26,19 +41,14 @@ class MCTSNode:
         self.visit_count = 0  # N(s, a)
         self.total_value = 0.0  # W(s, a)
         self.mean_value = 0.0  # Q(s, a)
-        self.virtual_loss = 0  # V(s, a)
         self.children: Dict[int, MCTSNode] = {}  # action_index -> MCTSNode
-        self.lock = threading.Lock()
 
     @property
     def value(self) -> float:
-        """Returns Q(s,a) adjusted for virtual loss during parallel search."""
-        # Treat virtual loss visits as losses (score = -1) to steer threads elsewhere
-        n = self.visit_count + self.virtual_loss
-        if n == 0:
+        """Returns Q(s,a)."""
+        if self.visit_count == 0:
             return 0.0
-        w = self.total_value - self.virtual_loss
-        return w / n
+        return self.total_value / self.visit_count
 
     def select_child(self, c_puct: float) -> Tuple[int, 'MCTSNode']:
         """
@@ -49,12 +59,11 @@ class MCTSNode:
         best_action = -1
         best_child = None
 
-        total_visits = sum(child.visit_count for child in self.children.values())
-        sqrt_total = math.sqrt(total_visits) if total_visits > 0 else 1.0
+        # N(s) is this node's own visit count, maintained during backpropagation.
+        sqrt_total = math.sqrt(self.visit_count) if self.visit_count > 0 else 1.0
 
         for action, child in self.children.items():
-            # Adjust prior probability based on PUCT selection formula
-            u = child.value + c_puct * child.prior * sqrt_total / (1.0 + child.visit_count + child.virtual_loss)
+            u = child.value + c_puct * child.prior * sqrt_total / (1.0 + child.visit_count)
             if u > best_score:
                 best_score = u
                 best_action = action
@@ -74,22 +83,11 @@ class MCTSNode:
                 move = decode_move(action, board)
                 self.children[action] = MCTSNode(prior=prior, parent=self, move=move)
 
-    def add_virtual_loss(self):
-        """Adds virtual loss to discourage multiple threads from exploring identical paths."""
-        with self.lock:
-            self.virtual_loss += 1
-
-    def remove_virtual_loss(self):
-        """Removes virtual loss once simulation/evaluation completes."""
-        with self.lock:
-            self.virtual_loss -= 1
-
     def update(self, value: float):
         """Backpropagates the value through this node."""
-        with self.lock:
-            self.visit_count += 1
-            self.total_value += value
-            self.mean_value = self.total_value / self.visit_count
+        self.visit_count += 1
+        self.total_value += value
+        self.mean_value = self.total_value / self.visit_count
 
 
 class EvaluatorBase:
@@ -108,22 +106,37 @@ class NeuralNetEvaluator(EvaluatorBase):
 
     def evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
         import torch
-        # Encode board to 19-plane tensor (active player's perspective)
+        is_black = (board.turn == chess.BLACK)
+
+        # Encode board to 18-plane tensor (active player's perspective)
         tensor = encode_board(board)
         with torch.no_grad():
-            tensor_t = torch.tensor(tensor, dtype=torch.float32, device=self.device).unsqueeze(0) # (1, 19, 8, 8)
+            tensor_t = torch.tensor(tensor, dtype=torch.float32, device=self.device).unsqueeze(0)  # (1, 18, 8, 8)
 
             # Forward pass
             logits, value_t, _ = self.model(tensor_t)
             logits = logits.squeeze(0).cpu().numpy()
-            value = float(value_t.item()) # value is in [-1, 1]
+            value = float(value_t.item())  # value is in [-1, 1]
 
-        # Mask illegal moves and apply softmax
-        legal_mask = get_legal_move_mask(board)
+        # Mask illegal moves using perspective-aware mask (matches mirrored board)
+        legal_mask = get_legal_move_mask_for_perspective(board)
         masked_logits = np.where(legal_mask, logits, -1e9)
         # Softmax computation
         exp_logits = np.exp(masked_logits - np.max(masked_logits))
-        policy_probs = exp_logits / np.sum(exp_logits)
+        policy_probs_mirrored = exp_logits / np.sum(exp_logits)
+
+        # Unmirror the policy back to the original (non-mirrored) action space
+        # so callers can use standard encode_move() indices.
+        if is_black:
+            policy_probs = np.zeros(4096, dtype=np.float32)
+            for action_mirrored in range(4096):
+                if policy_probs_mirrored[action_mirrored] > 0:
+                    from_sq = chess.square_mirror(action_mirrored // 64)
+                    to_sq = chess.square_mirror(action_mirrored % 64)
+                    action_orig = from_sq * 64 + to_sq
+                    policy_probs[action_orig] = policy_probs_mirrored[action_mirrored]
+        else:
+            policy_probs = policy_probs_mirrored
 
         return policy_probs, value
 
@@ -136,7 +149,6 @@ class SubprocessStockfish:
 
     def start(self):
         import subprocess
-        import sys
         try:
             self.proc = subprocess.Popen(
                 [self.path],
@@ -147,11 +159,24 @@ class SubprocessStockfish:
                 bufsize=1
             )
             self.send("uci")
-            self.read_until("uciok")
+            self.read_until("uciok", timeout=10.0)
             self.send("isready")
-            self.read_until("readyok")
+            self.read_until("readyok", timeout=10.0)
         except Exception as e:
-            print(f"[Warning] Failed to start Stockfish process at {self.path}: {e}", file=sys.stderr)
+            print(f"info string [Warning] Failed to start Stockfish process at {self.path}: {e}")
+            sys.stdout.flush()
+            # Clean up any partially-started process
+            if self.proc:
+                try:
+                    self.proc.kill()
+                except Exception:
+                    pass
+                for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                    if pipe:
+                        try:
+                            pipe.close()
+                        except Exception:
+                            pass
             self.proc = None
 
     def send(self, cmd: str):
@@ -162,21 +187,44 @@ class SubprocessStockfish:
             except Exception:
                 pass
 
-    def read_until(self, expected: str) -> List[str]:
-        lines = []
+    def read_until(self, expected: str, timeout: float = 30.0) -> List[str]:
+        """Reads lines from Stockfish stdout until the expected token is found.
+        
+        Uses a background thread to avoid deadlocking if Stockfish hangs.
+        Returns collected lines. If timeout expires, returns whatever was collected.
+        """
+        import threading
+        lines: List[str] = []
         if not self.proc or not self.proc.stdout:
             return lines
-        while True:
+
+        done = threading.Event()
+
+        def _reader():
             try:
-                line = self.proc.stdout.readline()
-                if not line:
-                    break
-                stripped = line.strip()
-                lines.append(stripped)
-                if stripped.startswith(expected):
-                    break
+                while not done.is_set():
+                    line = self.proc.stdout.readline()
+                    if not line:
+                        break
+                    stripped = line.strip()
+                    lines.append(stripped)
+                    if stripped.startswith(expected):
+                        break
             except Exception:
-                break
+                pass
+            finally:
+                done.set()
+
+        reader_thread = threading.Thread(target=_reader, daemon=True)
+        reader_thread.start()
+        reader_thread.join(timeout=timeout)
+
+        if not done.is_set():
+            # Timeout: Stockfish is stuck
+            done.set()
+            print(f"info string [Warning] Stockfish read_until('{expected}') timed out after {timeout}s")
+            sys.stdout.flush()
+
         return lines
 
     def evaluate_position(self, board: chess.Board, depth: int, multipv: int = 3) -> List[str]:
@@ -190,11 +238,18 @@ class SubprocessStockfish:
             try:
                 self.send("quit")
                 self.proc.wait(timeout=1)
-            except:
+            except Exception:
                 try:
                     self.proc.kill()
-                except:
+                except Exception:
                     pass
+            # Close pipes to avoid ResourceWarning about unclosed file handles
+            for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except Exception:
+                        pass
             self.proc = None
 
 
@@ -203,18 +258,16 @@ class StockfishEvaluator(EvaluatorBase):
     Evaluates positions using a local Stockfish binary via synchronous subprocess UCI commands.
     Used for Stockfish-guided MCTS (Hybrid mode), avoiding any training or heavy overhead.
     """
-    def __init__(self, stockfish_path: str = "stockfish", depth: int = 5, time_limit: float = 0.005):
+    def __init__(self, stockfish_path: str = "stockfish", depth: int = 5):
         self.stockfish_path = stockfish_path
         self.depth = depth
-        self.time_limit = time_limit
         self.engine = None
-        self.lock = threading.Lock()
         
         # Try to launch engine
         self.engine = SubprocessStockfish(self.stockfish_path)
         if self.engine.proc is None:
-            import sys
-            print(f"[Warning] Could not load Stockfish engine. Falling back to a material heuristic evaluator.", file=sys.stderr)
+            print("info string [Warning] Could not load Stockfish engine. Falling back to a material heuristic evaluator.")
+            sys.stdout.flush()
             self.engine = None
 
     def _restart_engine(self):
@@ -230,106 +283,109 @@ class StockfishEvaluator(EvaluatorBase):
         if self.engine is None or self.engine.proc is None:
             return self._heuristic_evaluate(board)
 
-        with self.lock:
-            try:
-                # Query Stockfish synchronously
-                lines = self.engine.evaluate_position(board, self.depth, multipv=3)
-                
-                # Parse lines
-                move_scores_dict = {}
-                best_eval = 0
-                best_eval_set = False
-                
-                for line in lines:
-                    if line.startswith("info"):
-                        tokens = line.split()
-                        
-                        # Extract multipv
-                        multipv = 1
-                        if "multipv" in tokens:
-                            multipv_idx = tokens.index("multipv") + 1
-                            if multipv_idx < len(tokens):
-                                multipv = int(tokens[multipv_idx])
-                        
-                        # Extract score
-                        score_val = 0
-                        if "score" in tokens:
-                            score_idx = tokens.index("score") + 1
-                            if score_idx + 1 < len(tokens):
-                                score_type = tokens[score_idx] # "cp" or "mate"
-                                score_value_str = tokens[score_idx + 1]
-                                try:
-                                    score_value = int(score_value_str)
-                                    if score_type == "mate":
-                                        score_val = 10000 if score_value > 0 else -10000
-                                    else:
-                                        score_val = score_value
-                                except:
-                                    pass
-                        
-                        # Extract PV move
-                        if "pv" in tokens:
-                            pv_idx = tokens.index("pv") + 1
-                            if pv_idx < len(tokens):
-                                pv_move_str = tokens[pv_idx]
-                                try:
-                                    pv_move = chess.Move.from_uci(pv_move_str)
-                                    # Only add if it's a legal move for the current board
-                                    if pv_move in board.legal_moves:
-                                        move_scores_dict[pv_move] = score_val
-                                except:
-                                    pass
-                        
-                        # Save the score of multipv 1 as main eval
-                        if multipv == 1:
-                            best_eval = score_val
-                            best_eval_set = True
-                
-                if not best_eval_set:
-                    return self._heuristic_evaluate(board)
+        try:
+            # Query Stockfish synchronously
+            lines = self.engine.evaluate_position(board, self.depth, multipv=3)
 
-                move_scores = list(move_scores_dict.items())
+            # Parse lines
+            move_scores_dict = {}
+            best_eval = 0
+            best_eval_set = False
 
-                # Map score to value in [-1, 1] using tanh
-                value = math.tanh(best_eval / 200.0)
+            for line in lines:
+                if line.startswith("info"):
+                    tokens = line.split()
 
-                # Get policy priors from moves evaluated
-                legal_mask = get_legal_move_mask(board)
-                policy_probs = np.zeros(4096, dtype=np.float32)
+                    # Extract multipv
+                    multipv = 1
+                    if "multipv" in tokens:
+                        multipv_idx = tokens.index("multipv") + 1
+                        if multipv_idx < len(tokens):
+                            multipv = int(tokens[multipv_idx])
 
-                # If no scores are returned, fallback to uniform
-                if not move_scores:
-                    legal_moves = list(board.legal_moves)
-                    for move in legal_moves:
-                        policy_probs[encode_move(move)] = 1.0 / len(legal_moves)
-                else:
-                    # Softmax scores with numerical stability
-                    moves = [item[0] for item in move_scores]
-                    scores = np.array([item[1] for item in move_scores], dtype=np.float32)
-                    # Shift for numerical stability (subtract max)
-                    scores_shifted = (scores - np.max(scores)) / 100.0  # temp scale of 100 centipawns
-                    scores_exp = np.exp(scores_shifted)
-                    scores_prob = scores_exp / np.sum(scores_exp)
+                    # Extract score
+                    score_val = 0
+                    if "score" in tokens:
+                        score_idx = tokens.index("score") + 1
+                        if score_idx + 1 < len(tokens):
+                            score_type = tokens[score_idx] # "cp" or "mate"
+                            score_value_str = tokens[score_idx + 1]
+                            try:
+                                score_value = int(score_value_str)
+                                if score_type == "mate":
+                                    score_val = 10000 if score_value > 0 else -10000
+                                else:
+                                    score_val = score_value
+                            except:
+                                pass
 
-                    # Distribute most probability among evaluated PV moves
-                    for move, prob in zip(moves, scores_prob):
-                        policy_probs[encode_move(move)] = prob * 0.90
-                    
-                    # Remaining 10% distributed uniformly across all legal moves for exploration
-                    legal_moves = list(board.legal_moves)
-                    for move in legal_moves:
-                        policy_probs[encode_move(move)] += 0.10 / len(legal_moves)
-                
-                # Ensure it sums to 1.0
-                policy_probs = policy_probs / np.sum(policy_probs)
-                return policy_probs, value
+                    # Extract PV move
+                    if "pv" in tokens:
+                        pv_idx = tokens.index("pv") + 1
+                        if pv_idx < len(tokens):
+                            pv_move_str = tokens[pv_idx]
+                            try:
+                                pv_move = chess.Move.from_uci(pv_move_str)
+                                # Only add if it's a legal move for the current board
+                                if pv_move in board.legal_moves:
+                                    move_scores_dict[pv_move] = score_val
+                            except:
+                                pass
 
-            except Exception as e:
-                import sys
-                print(f"[Warning] Stockfish evaluation error: {e}. Restarting Stockfish process...", file=sys.stderr)
-                sys.stderr.flush()
-                self._restart_engine()
+                    # Save the score of multipv 1 as main eval
+                    if multipv == 1:
+                        best_eval = score_val
+                        best_eval_set = True
+
+            if not best_eval_set:
                 return self._heuristic_evaluate(board)
+
+            move_scores = list(move_scores_dict.items())
+
+            # Map score to value in [-1, 1] using tanh
+            value = math.tanh(best_eval / 200.0)
+
+            # Get policy priors from moves evaluated
+            legal_mask = get_legal_move_mask(board)
+            policy_probs = np.zeros(4096, dtype=np.float32)
+
+            # If no scores are returned, fallback to uniform
+            if not move_scores:
+                legal_moves = list(board.legal_moves)
+                for move in legal_moves:
+                    policy_probs[encode_move(move)] = 1.0 / len(legal_moves)
+            else:
+                # Softmax scores with numerical stability
+                moves = list(move_scores_dict.keys())
+                scores = list(move_scores_dict.values())
+
+                # Convert scores (centipawns) to probabilities
+                # Use a softmax with a temperature scale
+                scaled_scores = np.array(scores, dtype=np.float32) / 100.0
+
+                # Prevent np.exp overflow by subtracting the max score
+                max_score = np.max(scaled_scores)
+                exp_scores = np.exp(scaled_scores - max_score)
+                scores_prob = exp_scores / np.sum(exp_scores)
+
+                # Distribute most probability among evaluated PV moves
+                for move, prob in zip(moves, scores_prob):
+                    policy_probs[encode_move(move)] = prob * 0.90
+
+                # Remaining 10% distributed uniformly across all legal moves for exploration
+                legal_moves = list(board.legal_moves)
+                for move in legal_moves:
+                    policy_probs[encode_move(move)] += 0.10 / len(legal_moves)
+
+            # Ensure it sums to 1.0
+            policy_probs = policy_probs / np.sum(policy_probs)
+            return policy_probs, value
+
+        except Exception as e:
+            print(f"info string [Warning] Stockfish evaluation error: {e}. Restarting Stockfish process...")
+            sys.stdout.flush()
+            self._restart_engine()
+            return self._heuristic_evaluate(board)
 
     def _heuristic_evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
         """Lightweight fallback evaluator based on piece values."""
@@ -369,34 +425,53 @@ class StockfishEvaluator(EvaluatorBase):
 class MCTS:
     """
     Performs Monte Carlo Tree Search.
-    Supports parallel simulations with virtual loss, Dirichlet noise, and transposition tables.
+    Supports Dirichlet noise, an LRU-bounded transposition table,
+    wall-clock deadlines and hybrid Alpha-Beta prior boosting for tactical awareness.
     """
     def __init__(self, evaluator: EvaluatorBase, c_puct: float = 1.5, num_simulations: int = 800):
         self.evaluator = evaluator
         self.c_puct = c_puct
         self.num_simulations = num_simulations
-        self.transposition_table: Dict[str, Tuple[np.ndarray, float]] = {}
-        self.tt_lock = threading.Lock()
+        self.transposition_table: 'OrderedDict[str, Tuple[np.ndarray, float]]' = OrderedDict()
+        self.abort_search = False
+
+    def clear_cache(self):
+        """Drops all cached evaluations (call when the evaluator changes or a new game starts)."""
+        self.transposition_table.clear()
 
     def _get_evaluation(self, board: chess.Board) -> Tuple[np.ndarray, float]:
-        """Queries the evaluator, utilizing the transposition table for caching."""
+        """Queries the evaluator, utilizing the LRU transposition table for caching."""
         fen = board.fen()
-        with self.tt_lock:
-            if fen in self.transposition_table:
-                return self.transposition_table[fen]
+        cached = self.transposition_table.get(fen)
+        if cached is not None:
+            self.transposition_table.move_to_end(fen)
+            return cached
 
         policy, value = self.evaluator.evaluate(board)
 
-        with self.tt_lock:
-            self.transposition_table[fen] = (policy, value)
+        self.transposition_table[fen] = (policy, value)
+        while len(self.transposition_table) > MAX_TT_ENTRIES:
+            self.transposition_table.popitem(last=False)
         return policy, value
 
-    def search(self, board: chess.Board, add_noise: bool = False) -> MCTSNode:
+    def search(self, board: chess.Board, add_noise: bool = False,
+               noise_epsilon: float = 0.25, noise_alpha: float = 0.3,
+               ab_candidates: 'Optional[List[tuple]]' = None,
+               deadline: Optional[float] = None) -> MCTSNode:
         """
         Runs MCTS search from the root node.
         Returns the root node containing search statistics.
+        
+        Args:
+            board: Current board position.
+            add_noise: Whether to add Dirichlet exploration noise at root.
+            noise_epsilon: Weight of Dirichlet noise vs policy (0.0-1.0).
+            noise_alpha: Dirichlet distribution alpha parameter.
+            ab_candidates: Optional list of (chess.Move, score_cp) tuples from
+                          Alpha-Beta filter to boost in the MCTS prior.
+            deadline: Optional absolute time.time() value; no new simulation is
+                      started once it is exceeded (time-control safety).
         """
-        import time
         import sys
         
         root = MCTSNode(prior=1.0)
@@ -405,17 +480,40 @@ class MCTS:
         policy, value = self._get_evaluation(board)
         legal_mask = get_legal_move_mask(board)
         
-        # Apply Dirichlet noise at the root if requested (for self-play exploration)
-        if add_noise and len(board.legal_moves) > 0:
-            epsilon = 0.25
-            alpha = 0.3
-            noise = np.random.dirichlet([alpha] * len(board.legal_moves))
+        # 1b. Boost priors for Alpha-Beta candidate moves
+        if ab_candidates and len(ab_candidates) > 0:
+            # Give AB candidates a significant prior boost proportional to their rank
+            ab_boost_total = 0.40  # Allocate 40% of total prior mass to AB candidates
+            remaining_mass = 1.0 - ab_boost_total
+            
+            # Scale existing policy down
+            policy = policy * remaining_mass
+            
+            # Distribute boost among AB candidates (weighted by rank)
+            n_cands = len(ab_candidates)
+            for rank, (move, score_cp) in enumerate(ab_candidates):
+                action = encode_move(move)
+                if legal_mask[action]:
+                    # Higher-ranked moves get more boost (linear decay)
+                    weight = (n_cands - rank) / sum(range(1, n_cands + 1))
+                    policy[action] += ab_boost_total * weight
+            
+            # Re-normalize
+            policy = policy * legal_mask
+            total = np.sum(policy)
+            if total > 0:
+                policy = policy / total
+        
+        # 1c. Apply Dirichlet noise at the root for exploration
+        legal_moves = list(board.legal_moves)
+        if add_noise and len(legal_moves) > 0:
+            noise = np.random.dirichlet([noise_alpha] * len(legal_moves))
             
             # Mix noise into policy
             noise_idx = 0
             for action in range(4096):
                 if legal_mask[action]:
-                    policy[action] = (1 - epsilon) * policy[action] + epsilon * noise[noise_idx]
+                    policy[action] = (1 - noise_epsilon) * policy[action] + noise_epsilon * noise[noise_idx]
                     noise_idx += 1
             # Re-normalize
             policy = policy * legal_mask
@@ -426,7 +524,9 @@ class MCTS:
         # 2. Run simulations
         start_time = time.time()
         for i in range(self.num_simulations):
-            if getattr(self, 'abort_search', False):
+            if self.abort_search:
+                break
+            if deadline is not None and time.time() >= deadline:
                 break
             self._simulate(root, board.copy())
             
@@ -490,10 +590,6 @@ class MCTS:
             board.push(node.move)
             search_path.append(node)
 
-        # Apply virtual loss to nodes on the path to simulate concurrent locks
-        for n in search_path:
-            n.add_virtual_loss()
-
         # Check for game end
         if board.is_game_over(claim_draw=True):
             outcome = board.outcome(claim_draw=True)
@@ -516,15 +612,47 @@ class MCTS:
         # Start by inverting the value so that each node stores value from the parent's perspective.
         value = -value
         for n in reversed(search_path):
-            n.remove_virtual_loss()
             n.update(value)
             value = -value  # Invert for opponent's turn
+
+    def get_visit_counts(self, board: chess.Board, add_noise: bool = False,
+                         noise_epsilon: float = 0.25, noise_alpha: float = 0.3,
+                         ab_candidates: 'Optional[List[tuple]]' = None,
+                         deadline: Optional[float] = None) -> np.ndarray:
+        """
+        Runs MCTS search and returns the raw visit count array of shape (4096,).
+        Move selection (temperature, top-K) is handled externally by DifficultyController.
+        
+        Args:
+            board: Current board position.
+            add_noise: Whether to add Dirichlet exploration noise.
+            noise_epsilon: Noise weight.
+            noise_alpha: Dirichlet alpha.
+            ab_candidates: Alpha-Beta candidate moves to boost.
+            deadline: Optional absolute time.time() after which no new simulations start.
+        
+        Returns:
+            np.ndarray of shape (4096,) with visit counts per action.
+        """
+        root = self.search(board, add_noise=add_noise,
+                          noise_epsilon=noise_epsilon, noise_alpha=noise_alpha,
+                          ab_candidates=ab_candidates, deadline=deadline)
+        
+        visits = np.zeros(4096, dtype=np.float32)
+        for action, child in root.children.items():
+            visits[action] = child.visit_count
+        
+        return visits
 
     def get_move_probs(self, board: chess.Board, temp: float = 1.0) -> np.ndarray:
         """
         Runs search and returns policy probabilities vector of shape (4096,).
         If temp = 1.0, probabilities are proportional to visit counts.
         If temp = 0.0, it is a one-hot vector corresponding to the max-visited move.
+        
+        Note: For the hybrid engine with difficulty control, prefer using
+        get_visit_counts() + select_move_with_variety() from difficulty.py instead.
+        This method is retained for backward compatibility with evaluator.py and self_play.py.
         """
         root = self.search(board, add_noise=(temp > 0.5))
         

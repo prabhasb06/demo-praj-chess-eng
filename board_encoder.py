@@ -1,6 +1,6 @@
 """
 MODULE 1: board_encoder.py
-Handles the representation and encoding of a chess position into an 8x8x19 float tensor,
+Handles the representation and encoding of a chess position into an 8x8x18 float tensor,
 as well as move encoding/decoding for the 4096-dimensional policy space.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import chess
 
 # Mathematical Encoding Formulation:
-# A chess board state S is mapped to a tensor X of shape (19, 8, 8).
+# A chess board state S is mapped to a tensor X of shape (18, 8, 8).
 # To maintain a single learning perspective, if it is Black's turn, we mirror the board
 # vertically and swap colors before encoding.
 # The planes are defined as:
@@ -19,22 +19,25 @@ import chess
 # Plane 14:     Opponent castling rights - Kingside (o-o)
 # Plane 15:     Opponent castling rights - Queenside (o-o-o)
 # Plane 16:     En Passant target square
-# Plane 17:     Side to move (1.0 for White, 0.0 for Black)
-# Plane 18:     Halfmove clock (draw rule counter), scaled as halfmove_clock / 100.0
+# Plane 17:     Halfmove clock (draw rule counter), scaled as halfmove_clock / 100.0
+#
+# Note: there is no side-to-move plane. Because the encoding always flips to the
+# active player's perspective, the side to move is implicitly "plane owner" and a
+# constant plane would carry zero information.
 
 PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
 
 def encode_board(board: chess.Board) -> np.ndarray:
     """
-    Encodes a chess.Board state into a (19, 8, 8) numpy float32 array.
+    Encodes a chess.Board state into a (18, 8, 8) numpy float32 array.
     Applies perspective flipping: if Black to move, mirrors board and swaps colors.
     """
     # 1. Perspective flipping: if Black's turn, mirror the board
     is_black = (board.turn == chess.BLACK)
     working_board = board.mirror() if is_black else board.copy()
 
-    # Initialize tensor of shape (19, 8, 8)
-    tensor = np.zeros((19, 8, 8), dtype=np.float32)
+    # Initialize tensor of shape (18, 8, 8)
+    tensor = np.zeros((18, 8, 8), dtype=np.float32)
 
     # Helper to map 0-63 square to (row, col)
     # python-chess square 0 is a1 (bottom left, rank 1, file A)
@@ -77,17 +80,9 @@ def encode_board(board: chess.Board) -> np.ndarray:
         row, col = get_coords(ep_square)
         tensor[16, row, col] = 1.0
 
-    # 5. Side to move (Plane 17)
-    # Originally, board.turn tells us the true side to move
-    # 1.0 for White, 0.0 for Black
-    if board.turn == chess.WHITE:
-        tensor[17, :, :] = 1.0
-    else:
-        tensor[17, :, :] = 0.0
-
-    # 6. Halfmove clock / rule counter (Plane 18)
+    # 5. Halfmove clock (Plane 17)
     # Scaled to [0, 1] range. Max halfmove clock in chess is 100 for 50-move rule.
-    tensor[18, :, :] = min(working_board.halfmove_clock, 100) / 100.0
+    tensor[17, :, :] = min(working_board.halfmove_clock, 100) / 100.0
 
     return tensor
 
@@ -100,10 +95,26 @@ def encode_move(move: chess.Move) -> int:
     """
     return move.from_square * 64 + move.to_square
 
+
+def encode_move_for_perspective(move: chess.Move, is_black: bool) -> int:
+    """
+    Encodes a chess.Move into an action index, mirroring squares when encoding
+    for Black so the action space aligns with the mirrored board encoding.
+    """
+    if is_black:
+        from_sq = chess.square_mirror(move.from_square)
+        to_sq = chess.square_mirror(move.to_square)
+    else:
+        from_sq = move.from_square
+        to_sq = move.to_square
+    return from_sq * 64 + to_sq
+
+
 def decode_move(action: int, board: chess.Board) -> chess.Move:
     """
     Decodes an action index in [0, 4095] into a chess.Move.
-    Requires the current board to determine if the move is a promotion (defaulting to Queen).
+    Requires the current board to determine if the move is a promotion.
+    Checks all legal promotions for the from/to pair and defaults to Queen.
     """
     from_square = action // 64
     to_square = action % 64
@@ -117,23 +128,60 @@ def decode_move(action: int, board: chess.Board) -> chess.Move:
     if piece and piece.piece_type == chess.PAWN:
         to_rank = chess.square_rank(to_square)
         if (piece.color == chess.WHITE and to_rank == 7) or (piece.color == chess.BLACK and to_rank == 0):
-            # Default to Queen promotion.
-            # In case the board has specific legal moves, we check if promoting to Rook/Bishop/Knight is required,
-            # but for standard policy outputs, we default to Queen.
+            # Check which promotions are legal for this from/to pair.
+            # Prefer Queen, but accept any legal promotion.
+            preference = [chess.QUEEN, chess.KNIGHT, chess.ROOK, chess.BISHOP]
+            for promo in preference:
+                candidate = chess.Move(from_square, to_square, promotion=promo)
+                if candidate in board.legal_moves:
+                    return candidate
+            # Fallback: default to Queen promotion even if not in legal moves
+            # (caller should validate legality separately)
             move.promotion = chess.QUEEN
 
     return move
 
+
+def decode_move_for_perspective(action: int, board: chess.Board) -> chess.Move:
+    """
+    Decodes an action index from the perspective-mirrored action space.
+    If it's Black's turn, unmirrors the squares before decoding.
+    """
+    from_square = action // 64
+    to_square = action % 64
+
+    if board.turn == chess.BLACK:
+        from_square = chess.square_mirror(from_square)
+        to_square = chess.square_mirror(to_square)
+
+    # Re-encode as a standard action and use the standard decoder
+    return decode_move(from_square * 64 + to_square, board)
+
+
 def get_legal_move_mask(board: chess.Board) -> np.ndarray:
     """
     Returns a boolean mask of shape (4096,) where True represents legal moves.
-    Matches the board's current turn.
+    Uses raw square indices (no perspective mirroring).
     """
     mask = np.zeros(4096, dtype=bool)
     for move in board.legal_moves:
         action = encode_move(move)
         mask[action] = True
     return mask
+
+
+def get_legal_move_mask_for_perspective(board: chess.Board) -> np.ndarray:
+    """
+    Returns a boolean mask of shape (4096,) in the perspective-mirrored action space.
+    When it's Black's turn, move squares are mirrored to match the mirrored board encoding.
+    """
+    mask = np.zeros(4096, dtype=bool)
+    is_black = (board.turn == chess.BLACK)
+    for move in board.legal_moves:
+        action = encode_move_for_perspective(move, is_black)
+        mask[action] = True
+    return mask
+
 
 def mirror_move(move: chess.Move) -> chess.Move:
     """

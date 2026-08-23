@@ -1,7 +1,15 @@
 /*
  * MODULE 6: uci_engine.cpp
- * Complete, production-grade UCI Chess Engine in C++.
- * Integrates LibTorch for neural network evaluations and runs a high-speed C++ MCTS.
+ *
+ * *** NON-FUNCTIONAL PROTOTYPE — DO NOT USE FOR PLAY ***
+ *
+ * This file is a skeleton/sketch only. Known gaps:
+ *   - generate_legal_moves() wraps around board edges and ignores pins/checks
+ *   - make_move() does not handle castling rook moves, en passant capture,
+ *     castling-rights updates, en-passant square updates, or the halfmove clock
+ *   - FEN input is ignored (resets to the start position)
+ * The real, working UCI engine in this project is uci_engine.py (Python).
+ * This file is kept purely as a reference sketch for a future C++ port.
  */
 
 #include <iostream>

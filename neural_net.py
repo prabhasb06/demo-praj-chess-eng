@@ -9,6 +9,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Single source of truth for the network architecture. Training pipeline,
+# self-play and evaluation must all construct ChessNet with these values so
+# checkpoints always load. Input is the 18-plane encoding from board_encoder.
+DEFAULT_ARCH = {"num_blocks": 10, "filters": 128, "in_channels": 18}
+
 class SEBlock(nn.Module):
     """
     Squeeze-and-Excitation Block.
@@ -59,13 +64,13 @@ class ResidualBlockSE(nn.Module):
 class ChessNet(nn.Module):
     """
     The main Chess Neural Network architecture.
-    Input shape: (Batch, 19, 8, 8)
+    Input shape: (Batch, 18, 8, 8)
     Outputs:
       - Policy Logits: (Batch, 4096)
       - Value: (Batch, 1) in [-1, 1] (tanh)
       - Moves Left: (Batch, 1) (relu)
     """
-    def __init__(self, num_blocks=20, filters=256, in_channels=19):
+    def __init__(self, num_blocks=10, filters=128, in_channels=18):
         super(ChessNet, self).__init__()
         self.num_blocks = num_blocks
         self.filters = filters
@@ -128,7 +133,7 @@ class ChessNet(nn.Module):
         m = torch.flatten(m, start_dim=1)
         m = self.fc_moves1(m)
         m = self.relu(m)
-        moves_left = F.relu(self.fc_moves2(m)) # non-negative prediction
+        moves_left = F.softplus(self.fc_moves2(m))  # non-negative; softplus avoids dead gradients unlike ReLU
 
         return policy_logits, value, moves_left
 
