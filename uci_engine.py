@@ -153,36 +153,45 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
         search_start = time.time()
         
         # =============================================
-        # PHASE 1: Alpha-Beta Tactical Filter
+        # PHASE 1: Tactical Analysis / Prior Seeding
         # =============================================
-        ab_result = ab_filter.analyze(board)
-        ab_elapsed = time.time() - search_start
-        
-        # Check if aborted during AB phase
-        if abort_event.is_set() or _superseded(search_id, state):
-            return
-        
-        if ab_result.best_move:
-            _uci_print(f"info string AB filter: score={ab_result.score_cp}cp "
-                       f"tactical={ab_result.is_tactical} "
-                       f"candidates={len(ab_result.candidate_moves)} "
-                       f"time={int(ab_elapsed*1000)}ms")
-        
-        if ab_result.is_tactical and ab_result.best_move:
-            best_move = ab_result.best_move
-            if best_move in board.legal_moves:
-                if not _superseded(search_id, state):
-                    _uci_print(f"bestmove {best_move.uci()}")
+        # For maximum strength (Level >= 8 or Stockfish evaluator), Stockfish-guided MCTS
+        # provides deep, accurate tactical and strategic evaluation. Dedicate 100% time to MCTS.
+        use_ab = params.level < 8 and not isinstance(evaluator, StockfishEvaluator)
+        ab_candidates = None
+        ab_elapsed = 0.0
+
+        if use_ab:
+            ab_result = ab_filter.analyze(board)
+            ab_elapsed = time.time() - search_start
+            
+            # Check if aborted during AB phase
+            if abort_event.is_set() or _superseded(search_id, state):
                 return
-        
+            
+            if ab_result.best_move:
+                _uci_print(f"info string AB filter: score={ab_result.score_cp}cp "
+                           f"tactical={ab_result.is_tactical} "
+                           f"candidates={len(ab_result.candidate_moves)} "
+                           f"time={int(ab_elapsed*1000)}ms")
+            
+            # Only play immediately on verified checkmate
+            if ab_result.score_cp >= 90000 and ab_result.best_move in board.legal_moves:
+                board_test = board.copy()
+                board_test.push(ab_result.best_move)
+                if board_test.is_checkmate():
+                    if not _superseded(search_id, state):
+                        _uci_print(f"bestmove {ab_result.best_move.uci()}")
+                    return
+            
+            ab_candidates = ab_result.candidate_moves if ab_result.candidate_moves else None
+
         # =============================================
-        # PHASE 2: MCTS Strategic Search (with AB priors)
+        # PHASE 2: MCTS Strategic Search
         # =============================================
         mcts.num_simulations = params.num_simulations
         mcts.c_puct = params.c_puct
         evaluator.depth = params.stockfish_depth
-        
-        ab_candidates = ab_result.candidate_moves if ab_result.candidate_moves else None
         
         remaining_time = max_time - ab_elapsed
         if remaining_time < 0.05:
@@ -198,7 +207,7 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
             ab_candidates=ab_candidates,
             deadline=deadline
         )
-        
+
         # Check again after MCTS returns
         if abort_event.is_set() or _superseded(search_id, state):
             return
@@ -281,7 +290,7 @@ def main():
         base_dir = os.path.dirname(os.path.abspath(__file__))
     stockfish_path = os.path.join(base_dir, "stockfish.exe")
 
-    difficulty = DifficultyController(level=7)
+    difficulty = DifficultyController(level=10)
     params = difficulty.get_params()
 
     evaluator = StockfishEvaluator(
@@ -317,7 +326,7 @@ def main():
     state = {"current_search_id": 0}
     
     board = chess.Board()
-    move_variety = True
+    move_variety = False
 
     while True:
         try:
@@ -333,8 +342,8 @@ def main():
             if cmd == "uci":
                 _uci_print("id name Praj MCTS v2.0")
                 _uci_print("id author Praj")
-                _uci_print("option name Difficulty type spin default 7 min 1 max 10")
-                _uci_print("option name MoveVariety type check default true")
+                _uci_print("option name Difficulty type spin default 10 min 1 max 10")
+                _uci_print("option name MoveVariety type check default false")
                 _uci_print("option name StockfishPath type string default stockfish.exe")
                 _uci_print("uciok")
                 
