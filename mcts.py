@@ -17,6 +17,13 @@ from typing import Dict, Tuple, List, Optional
 import numpy as np
 import chess
 
+import threading
+STDOUT_LOCK = threading.Lock()
+def uci_print(*args, **kwargs):
+    with STDOUT_LOCK:
+        print(*args, **kwargs)
+        
+
 from board_encoder import (encode_board, encode_move,
                            decode_move, get_legal_move_mask,
                            get_legal_move_mask_for_perspective)
@@ -142,6 +149,7 @@ class SubprocessStockfish:
     def __init__(self, path: str):
         self.path = path
         self.proc = None
+        self.reader_thread = None
         self.start()
 
     def start(self):
@@ -160,8 +168,8 @@ class SubprocessStockfish:
             self.send("isready")
             self.read_until("readyok", timeout=10.0)
         except Exception as e:
-            print(f"info string [Warning] Failed to start Stockfish process at {self.path}: {e}")
-            sys.stdout.flush()
+            uci_print(f"info string [Warning] Failed to start Stockfish process at {self.path}: {e}")
+            
             # Clean up any partially-started process
             if self.proc:
                 try:
@@ -195,6 +203,10 @@ class SubprocessStockfish:
         if not self.proc or not self.proc.stdout:
             return lines
 
+        if self.reader_thread is not None and self.reader_thread.is_alive():
+            uci_print("info string [Warning] Stockfish reader thread still busy from previous timeout.")
+            return lines
+
         done = threading.Event()
 
         def _reader():
@@ -212,15 +224,15 @@ class SubprocessStockfish:
             finally:
                 done.set()
 
-        reader_thread = threading.Thread(target=_reader, daemon=True)
-        reader_thread.start()
-        reader_thread.join(timeout=timeout)
+        self.reader_thread = threading.Thread(target=_reader, daemon=True)
+        self.reader_thread.start()
+        self.reader_thread.join(timeout=timeout)
 
         if not done.is_set():
             # Timeout: Stockfish is stuck
             done.set()
-            print(f"info string [Warning] Stockfish read_until('{expected}') timed out after {timeout}s")
-            sys.stdout.flush()
+            uci_print(f"info string [Warning] Stockfish read_until('{expected}') timed out after {timeout}s")
+            
 
         return lines
 
@@ -263,8 +275,8 @@ class StockfishEvaluator(EvaluatorBase):
         # Try to launch engine
         self.engine = SubprocessStockfish(self.stockfish_path)
         if self.engine.proc is None:
-            print("info string [Warning] Could not load Stockfish engine. Falling back to a material heuristic evaluator.")
-            sys.stdout.flush()
+            uci_print("info string [Warning] Could not load Stockfish engine. Falling back to a material heuristic evaluator.")
+            
             self.engine = None
 
     def _restart_engine(self):
@@ -378,8 +390,8 @@ class StockfishEvaluator(EvaluatorBase):
             return policy_probs, value
 
         except Exception as e:
-            print(f"info string [Warning] Stockfish evaluation error: {e}. Restarting Stockfish process...")
-            sys.stdout.flush()
+            uci_print(f"info string [Warning] Stockfish evaluation error: {e}. Restarting Stockfish process...")
+            
             self._restart_engine()
             return self._heuristic_evaluate(board)
 
@@ -567,8 +579,8 @@ class MCTS:
                     depth = len(pv)
                     
                     # Output standard UCI info string
-                    print(f"info depth {depth} score cp {score_cp} nodes {i+1} nps {nps} time {time_ms} pv {pv_str}")
-                    sys.stdout.flush()
+                    uci_print(f"info depth {depth} score cp {score_cp} nodes {i+1} nps {nps} time {time_ms} pv {pv_str}")
+                    
         
         return root
 

@@ -391,6 +391,9 @@ def quiescence(board: chess.Board, alpha: int, beta: int, depth_limit: int = 6,
     in_check = board.is_check()
     stand_pat = evaluate_board(board)
 
+    if depth_limit <= -4:
+        return stand_pat
+
     if not in_check:
         if depth_limit <= 0:
             return stand_pat
