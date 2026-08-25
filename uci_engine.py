@@ -115,8 +115,10 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
                      Cleared only by this function when it starts a fresh search.
     """
     # Only clear the abort flag if this search hasn't already been superseded
-    # (prevents clobbering a 'stop' that arrived between submit and execution).
-    if not _superseded(search_id, state):
+    # AND no 'stop' is pending (a stop arriving between submit and execution
+    # must be honoured, not wiped — the search below will then finish with
+    # zero simulations and emit a fallback bestmove immediately).
+    if not _superseded(search_id, state) and not state.get("stop_requested", False):
         abort_event.clear()
         mcts.abort_search = False
     mcts.is_searching = True
@@ -298,6 +300,14 @@ def main():
 
     ab_filter = AlphaBetaFilter(depth=params.ab_depth)
     
+    # GUIs pipe stdout (block-buffered by default). Force line buffering so
+    # protocol lines are never stuck in an 8 KB buffer, even if some code
+    # path prints without flushing.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     input_queue = queue.Queue()
     
     # Isolate stdin reading
@@ -342,9 +352,9 @@ def main():
                 opt_name, opt_value = _parse_setoption(tokens)
                 
                 if opt_name == "Difficulty" and opt_value is not None:
-                    abort_event.set()
-                    mcts.abort_search = True
-                    state["current_search_id"] += 1
+                    # Safe to apply mid-search (plain attribute reads used by
+                    # the next simulation). Do NOT supersede the in-flight
+                    # search here, or it would go silent without a bestmove.
                     try:
                         level = int(opt_value)
                     except ValueError:
@@ -352,7 +362,7 @@ def main():
                     difficulty.set_level(level)
                     params = difficulty.get_params()
                     
-                    mcts.num_simulations = 1_000_000_000 if is_infinite else params.num_simulations
+                    mcts.num_simulations = params.num_simulations
                     mcts.c_puct = params.c_puct
                     evaluator.depth = params.stockfish_depth
                     ab_filter.depth = params.ab_depth

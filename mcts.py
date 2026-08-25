@@ -20,9 +20,10 @@ import chess
 import threading
 STDOUT_LOCK = threading.Lock()
 def uci_print(*args, **kwargs):
+    """Thread-safe, flushed write to stdout (safe for piped UCI output)."""
     with STDOUT_LOCK:
         print(*args, **kwargs)
-        
+        sys.stdout.flush()
 
 from board_encoder import (encode_board, encode_move,
                            decode_move, get_legal_move_mask,
