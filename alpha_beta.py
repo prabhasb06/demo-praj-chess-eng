@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import chess
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -741,7 +741,7 @@ if __name__ == "__main__":
     _test("Mate score detected", result.score_cp >= MATE_SCORE - 100,
           f"score={result.score_cp}")
     _test("Marked as tactical", result.is_tactical)
-    _test(f"Speed < 1s", elapsed < 1.0, f"{elapsed:.3f}s")
+    _test("Speed < 1s", elapsed < 1.0, f"{elapsed:.3f}s")
 
     # --- Test 4: Checkmate position (game over) ---
     print("\n--- Checkmate Position ---")
@@ -782,7 +782,7 @@ if __name__ == "__main__":
     t0 = time.perf_counter()
     result = filt3.analyze(b)
     elapsed = time.perf_counter() - t0
-    _test(f"Depth 3 < 5s", elapsed < 5.0, f"{elapsed:.3f}s")
+    _test("Depth 3 < 5s", elapsed < 5.0, f"{elapsed:.3f}s")
     _test("Has candidate moves", len(result.candidate_moves) == 20,
           f"got {len(result.candidate_moves)}")
     _test("Has a best move", result.best_move is not None,

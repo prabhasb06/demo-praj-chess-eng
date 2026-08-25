@@ -8,7 +8,7 @@ import math
 import chess
 import numpy as np
 from typing import Tuple
-from mcts import MCTS, MCTSNode
+from mcts import MCTS
 from board_encoder import decode_move
 
 def play_match_game(mcts_white: MCTS, mcts_black: MCTS) -> float:
@@ -53,7 +53,6 @@ def evaluate_candidate(candidate_evaluator, best_evaluator, num_games=400, num_s
       - delta_elo: Elo rating difference
       - promoted: True if win_rate >= 0.55, False otherwise
     """
-    import numpy as np # Import locally to ensure availability
     candidate_mcts = MCTS(candidate_evaluator, c_puct=1.5, num_simulations=num_sims)
     best_mcts = MCTS(best_evaluator, c_puct=1.5, num_simulations=num_sims)
 
@@ -86,7 +85,7 @@ def evaluate_candidate(candidate_evaluator, best_evaluator, num_games=400, num_s
     safe_win_rate = max(1e-4, min(1.0 - 1e-4, win_rate))
     delta_elo = -400.0 * math.log10((1.0 - safe_win_rate) / safe_win_rate)
 
-    print(f"Evaluation Complete!")
+    print("Evaluation Complete!")
     print(f"  Candidate Win Rate: {win_rate:.2%} ({candidate_score}/{num_games} points)")
     print(f"  Elo Difference: {delta_elo:+.1f}")
     print(f"  Promotion Status: {'PROMOTED' if promoted else 'REJECTED'}")
@@ -95,7 +94,6 @@ def evaluate_candidate(candidate_evaluator, best_evaluator, num_games=400, num_s
 
 # Dummy wrapper to run a quick test from the CLI
 if __name__ == "__main__":
-    import numpy as np
     from neural_net import ChessNet
     from mcts import NeuralNetEvaluator
 

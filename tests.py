@@ -11,7 +11,7 @@ import unittest
 import numpy as np
 import chess
 
-from board_encoder import encode_board, encode_move, decode_move, get_legal_move_mask, mirror_move
+from board_encoder import encode_board, encode_move, decode_move, get_legal_move_mask
 from mcts import MCTS, StockfishEvaluator
 
 # Check if PyTorch is available

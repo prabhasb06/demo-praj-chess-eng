@@ -10,7 +10,6 @@ dead overhead in a serial search.
 """
 
 import math
-import random
 import sys
 import time
 from collections import OrderedDict
@@ -18,10 +17,9 @@ from typing import Dict, Tuple, List, Optional
 import numpy as np
 import chess
 
-from board_encoder import (encode_board, encode_move, encode_move_for_perspective,
-                           decode_move, decode_move_for_perspective,
-                           get_legal_move_mask, get_legal_move_mask_for_perspective,
-                           mirror_move)
+from board_encoder import (encode_board, encode_move,
+                           decode_move, get_legal_move_mask,
+                           get_legal_move_mask_for_perspective)
 
 # Maximum number of cached (policy, value) evaluations. Each entry is a 4096-float
 # policy (~16 KB), so this bounds cache memory at roughly 1 GB worst case; in
@@ -99,7 +97,6 @@ class EvaluatorBase:
 class NeuralNetEvaluator(EvaluatorBase):
     """Evaluates positions using the PyTorch Squeeze-and-Excitation ResNet model."""
     def __init__(self, model, device: str = "cpu"):
-        import torch
         self.model = model
         self.device = device
         self.model.eval()
@@ -316,7 +313,7 @@ class StockfishEvaluator(EvaluatorBase):
                                     score_val = 10000 if score_value > 0 else -10000
                                 else:
                                     score_val = score_value
-                            except:
+                            except Exception:
                                 pass
 
                     # Extract PV move
@@ -329,7 +326,7 @@ class StockfishEvaluator(EvaluatorBase):
                                 # Only add if it's a legal move for the current board
                                 if pv_move in board.legal_moves:
                                     move_scores_dict[pv_move] = score_val
-                            except:
+                            except Exception:
                                 pass
 
                     # Save the score of multipv 1 as main eval
@@ -346,7 +343,6 @@ class StockfishEvaluator(EvaluatorBase):
             value = math.tanh(best_eval / 200.0)
 
             # Get policy priors from moves evaluated
-            legal_mask = get_legal_move_mask(board)
             policy_probs = np.zeros(4096, dtype=np.float32)
 
             # If no scores are returned, fallback to uniform

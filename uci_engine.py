@@ -14,7 +14,7 @@ import chess
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 from mcts import MCTS, StockfishEvaluator
-from board_encoder import decode_move, encode_move
+from board_encoder import decode_move
 from alpha_beta import AlphaBetaFilter
 from difficulty import DifficultyController, select_move_with_variety
 

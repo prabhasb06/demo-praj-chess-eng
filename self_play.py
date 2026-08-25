@@ -6,7 +6,6 @@ Uses a circular Replay Buffer to cache board states, MCTS policies, and game out
 
 import os
 import random
-import time
 from collections import deque
 from typing import List, Tuple, Optional
 import numpy as np
@@ -14,8 +13,7 @@ import torch
 import torch.optim as optim
 import chess
 
-from board_encoder import (encode_board, decode_move, get_legal_move_mask,
-                           encode_move_for_perspective)
+from board_encoder import encode_board, decode_move
 from neural_net import ChessNet, DEFAULT_ARCH, compute_loss
 from mcts import MCTS, NeuralNetEvaluator
 
