@@ -193,7 +193,7 @@ BISHOP_PAIR_BONUS = 50  # Bonus for having both bishops
 # Static Evaluation
 # ---------------------------------------------------------------------------
 
-def evaluate_board(board: chess.Board) -> int:
+def evaluate_board(board: chess.Board, mobility: int = None) -> int:
     """
     Evaluate the board position and return a score in centipawns from the
     perspective of the **side to move**.
@@ -270,7 +270,9 @@ def evaluate_board(board: chess.Board) -> int:
     # --- Mobility ---
     # Only count side-to-move mobility (cheap). Opponent mobility would
     # require a null-move push/pop at every leaf which is too expensive.
-    our_mobility = board.legal_moves.count()
+    # NOTE: this is an intentional tempo-biased proxy, not a symmetric eval;
+    # callers that already enumerated moves may pass the count via `mobility`.
+    our_mobility = board.legal_moves.count() if mobility is None else mobility
 
     if board.turn == chess.WHITE:
         score_white += our_mobility * MOBILITY_WEIGHT
@@ -389,7 +391,10 @@ def quiescence(board: chess.Board, alpha: int, beta: int, depth_limit: int = 6,
         return 0
 
     in_check = board.is_check()
-    stand_pat = evaluate_board(board)
+    # Enumerate legal moves once; reuse for both the mobility term and the
+    # tactical move filter below (evaluate_board otherwise regenerates them).
+    all_moves = list(board.legal_moves)
+    stand_pat = evaluate_board(board, mobility=len(all_moves))
 
     if depth_limit <= -4:
         return stand_pat
@@ -407,13 +412,13 @@ def quiescence(board: chess.Board, alpha: int, beta: int, depth_limit: int = 6,
     # Generate tactical moves: captures + promotions
     # When in check, consider ALL moves (check evasions)
     if in_check:
-        tactical_moves = list(board.legal_moves)
+        tactical_moves = all_moves
         if not tactical_moves:
             # Checkmated (should have been caught above) — safety net
             return -(MATE_SCORE - ply)
     else:
         tactical_moves = [
-            m for m in board.legal_moves
+            m for m in all_moves
             if board.is_capture(m) or m.promotion is not None
         ]
 

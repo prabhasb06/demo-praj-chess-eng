@@ -180,6 +180,8 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
         mcts.num_simulations = 1_000_000_000 if is_infinite else params.num_simulations
         mcts.c_puct = params.c_puct
         evaluator.depth = params.stockfish_depth
+        if hasattr(evaluator, "multipv"):
+            evaluator.multipv = params.stockfish_multipv
         
         remaining_time = max_time - ab_elapsed
         if remaining_time < 0.05:
@@ -365,6 +367,8 @@ def main():
                     mcts.num_simulations = params.num_simulations
                     mcts.c_puct = params.c_puct
                     evaluator.depth = params.stockfish_depth
+                    if hasattr(evaluator, "multipv"):
+                        evaluator.multipv = params.stockfish_multipv
                     ab_filter.depth = params.ab_depth
                     
                     uci_print(f"info string Difficulty set to {level} "
@@ -431,8 +435,9 @@ def main():
                             moves_idx = idx
                     
                     if temp_board is None:
-                        uci_print(f"info string Unrecognised position format: {tokens[1]}")
-                        continue
+                        uci_print(f"info string Unrecognised position format: {tokens[1]}; "
+                                  f"reverting to startpos")
+                        temp_board = chess.Board()
 
                     if moves_idx != -1:
                         for move_str in tokens[moves_idx+1:]:
@@ -441,7 +446,11 @@ def main():
                     
                     board = temp_board
                 except Exception as e:
-                    uci_print(f"info string Error in position command: {e}")
+                    # Never keep a half-updated/stale board: the GUI believes
+                    # its position command succeeded. Revert to a known state.
+                    uci_print(f"info string Error in position command ({e}); "
+                              f"reverting to startpos")
+                    board = chess.Board()
                         
             elif cmd == "go":
                 if "ponder" in tokens:

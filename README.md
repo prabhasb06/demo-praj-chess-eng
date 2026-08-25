@@ -4,7 +4,7 @@ A hybrid chess engine combining **Monte Carlo Tree Search (MCTS)** with **Alpha-
 
 ## Features
 
-- **Hybrid Search**: Alpha-Beta tactical filter detects forced mates and large advantages before MCTS strategic search
+- **Hybrid Search**: Alpha-Beta tactical filter (mates, candidate seeding) for non-Stockfish evaluators and lower levels; the default Stockfish-guided MCTS handles tactics via deep Stockfish evaluations
 - **Neural Network**: SE-ResNet architecture with policy, value, and moves-left heads
 - **Stockfish Integration**: Optional Stockfish-guided MCTS evaluation for strong play
 - **10 Difficulty Levels**: Configurable ELO from ~600 to ~2400 with blunder simulation, temperature scheduling, and search depth scaling
@@ -45,8 +45,8 @@ A hybrid chess engine combining **Monte Carlo Tree Search (MCTS)** with **Alpha-
 ### Installation
 
 ```bash
-git clone https://github.com/your-username/praj-chess-engine.git
-cd praj-chess-engine
+git clone https://github.com/prabhasb06/demo-praj-chess-eng.git
+cd demo-praj-chess-eng
 pip install -r requirements.txt
 ```
 
@@ -71,13 +71,13 @@ run_engine.bat
 
 | Option | Type | Default | Range | Description |
 |--------|------|---------|-------|-------------|
-| `Difficulty` | spin | 7 | 1–10 | Engine strength (1=~600 ELO, 10=~2400 ELO) |
-| `MoveVariety` | check | true | — | Enable move variety via temperature/blunder simulation |
+| `Difficulty` | spin | 10 | 1–10 | Engine strength (1=~600 ELO, 10=~2400 ELO) |
+| `MoveVariety` | check | false | — | Enable move variety via temperature/blunder simulation |
 | `StockfishPath` | string | stockfish.exe | — | Path to Stockfish binary for hybrid evaluation |
 
 ## Difficulty Levels
 
-| Level | ~ELO | Simulations | AB Depth | Temperature | Blunder% |
+| Level | ~ELO | Simulations | AB Depth* | Temperature | Blunder% |
 |-------|------|-------------|----------|-------------|----------|
 | 1 | 600 | 20 | 1 | 2.00 | 30% |
 | 2 | 800 | 40 | 1 | 1.50 | 20% |
@@ -89,6 +89,16 @@ run_engine.bat
 | 8 | 2000 | 800 | 4 | 0.15 | 0% |
 | 9 | 2200 | 1200 | 4 | 0.05 | 0% |
 | 10 | 2400 | 2000 | 4 | 0.00 | 0% |
+
+\* AB depth applies when the Alpha-Beta filter is active (non-Stockfish evaluator).
+With the default Stockfish-guided evaluator, search strength is driven by
+simulation count, Stockfish depth, and MultiPV instead.
+
+## Time Controls
+
+The engine supports `go movetime`, `go wtime/btime/winc/binc [+ movestogo]`,
+`go depth N` (mapped to a bounded think time) and `go infinite` (search until
+`stop`). Every `go`/`stop` pair is answered with exactly one `bestmove`.
 
 ## Training (Self-Play)
 

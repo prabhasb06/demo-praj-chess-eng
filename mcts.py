@@ -230,10 +230,14 @@ class SubprocessStockfish:
         self.reader_thread.join(timeout=timeout)
 
         if not done.is_set():
-            # Timeout: Stockfish is stuck
+            # Timeout: Stockfish is stuck mid-search. Ask it to finish: the
+            # blocked reader drains until 'bestmove' and exits, keeping the
+            # pipe usable for future queries instead of leaking permanently.
             done.set()
             uci_print(f"info string [Warning] Stockfish read_until('{expected}') timed out after {timeout}s")
-            
+            self.send("stop")
+            if self.reader_thread is not None:
+                self.reader_thread.join(timeout=5.0)
 
         return lines
 
@@ -268,9 +272,10 @@ class StockfishEvaluator(EvaluatorBase):
     Evaluates positions using a local Stockfish binary via synchronous subprocess UCI commands.
     Used for Stockfish-guided MCTS (Hybrid mode), avoiding any training or heavy overhead.
     """
-    def __init__(self, stockfish_path: str = "stockfish", depth: int = 5):
+    def __init__(self, stockfish_path: str = "stockfish", depth: int = 5, multipv: int = 3):
         self.stockfish_path = stockfish_path
         self.depth = depth
+        self.multipv = max(1, multipv)
         self.engine = None
         
         # Try to launch engine
@@ -295,7 +300,7 @@ class StockfishEvaluator(EvaluatorBase):
 
         try:
             # Query Stockfish synchronously
-            lines = self.engine.evaluate_position(board, self.depth, multipv=3)
+            lines = self.engine.evaluate_position(board, self.depth, multipv=self.multipv)
 
             # Parse lines
             move_scores_dict = {}
@@ -450,15 +455,17 @@ class MCTS:
 
     def _get_evaluation(self, board: chess.Board) -> Tuple[np.ndarray, float]:
         """Queries the evaluator, utilizing the LRU transposition table for caching."""
-        fen = board.fen()
-        cached = self.transposition_table.get(fen)
+        # Key on EPD (position only, no halfmove/fullmove counters): policy and
+        # value never depend on the clocks, so this strictly increases hits.
+        key = board.epd()
+        cached = self.transposition_table.get(key)
         if cached is not None:
-            self.transposition_table.move_to_end(fen)
+            self.transposition_table.move_to_end(key)
             return cached
 
         policy, value = self.evaluator.evaluate(board)
 
-        self.transposition_table[fen] = (policy, value)
+        self.transposition_table[key] = (policy, value)
         while len(self.transposition_table) > MAX_TT_ENTRIES:
             self.transposition_table.popitem(last=False)
         return policy, value

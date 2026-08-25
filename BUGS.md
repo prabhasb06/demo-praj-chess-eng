@@ -1,5 +1,8 @@
 # Praj MCTS Chess Engine — Bug Report
 
+> **STATUS: RESOLVED** — see [Resolution Log](#resolution-log) at the bottom.
+> All critical/medium items fixed and empirically verified (9/9 UCI protocol tests).
+
 Audit date: 2026-08-25
 Audited against: `main` branch (`5511003`), local clone `C:\Users\prabh\chess_engine`
 Verification: static review of all modules + empirical runs
@@ -112,3 +115,30 @@ Verification: static review of all modules + empirical runs
 3. **BUG-3** (shared stdout lock)
 4. **BUG-4**, **BUG-5** (races/leaks)
 5. Low items opportunistically
+
+---
+
+## Resolution Log
+
+| Item | Status | Commit / Note |
+|------|--------|---------------|
+| BUG-1 stop → bestmove | FIXED + verified | `aa8aa74` (stop_requested fall-through) |
+| BUG-2 go depth/nodes/infinite | FIXED + verified | `aa8aa74`; depth→bounded budget, infinite runs until stop |
+| BUG-3 shared stdout lock | FIXED + verified | `aa8aa74` + `e495234` (flush restored; line buffering forced) |
+| BUG-4 setoption race | FIXED + verified | supersede kept for StockfishPath; Difficulty applied lock-free mid-search |
+| BUG-5 SF double-reader leak | FIXED | reader-thread guard (`aa8aa74`) |
+| REG-A engine mute under GUIs | FIXED + verified | `e495234` — flush + line buffering (regression from aa8aa74) |
+| REG-B setoption Difficulty NameError | FIXED + verified | `e495234` — removed undefined `is_infinite` reference |
+| BUG-6 stop race pre-worker-start | FIXED + verified | `e495234` — pending stop honoured before flag clear |
+| BUG-7 dead stockfish_multipv | FIXED | this commit — evaluator.multipv wired from difficulty params |
+| BUG-8 mobility double enumeration | PARTIAL | this commit — single enumeration per leaf; single-side tempo bias kept intentionally (cheap eval) |
+| BUG-9 TT keyed on clocks | FIXED | this commit — cache key now `board.epd()` |
+| BUG-10 stale board on bad position | FIXED | this commit — revert to startpos on parse failure |
+| BUG-11 repetition choices in tree | DOCUMENTED | scoring is already correct via `claim_draw=True`; avoiding repetition *choices* is a strength enhancement, not a bug fix — left as future work |
+| BUG-12 SF pipe unusable after timeout | FIXED | this commit — `stop` sent on timeout, blocked reader drains and exits |
+| README mismatches | FIXED | this commit — URL, defaults, AB-filter wording, time-control section |
+
+Verification battery at resolution time: `py_compile` clean · `alpha_beta.py`
+self-test 24/24 · `tests.py` 14/14 (6 skipped, no PyTorch) · UCI suite 9/9
+(handshake over buffered pipe, setoption before/during search, instant-stop
+race, mid-search stop, movetime/depth bounds, rapid storm, line integrity).
