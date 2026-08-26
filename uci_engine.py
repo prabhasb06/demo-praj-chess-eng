@@ -21,19 +21,35 @@ from difficulty import DifficultyController, select_move_with_variety
 # Uses uci_print from mcts.py
 
 
+def _num(token):
+    """Tolerant numeric parser for 'go' arguments.
+
+    UCI says milliseconds are integers, but some GUIs/tournament tools emit
+    floats ('29989.24'). int('29989.24') raises and used to nuke the whole
+    search into the instant-fallback path. Accept both.
+    """
+    try:
+        return int(token)
+    except (TypeError, ValueError):
+        try:
+            return int(float(token))
+        except (TypeError, ValueError):
+            return None
+
+
 def parse_time_from_go(tokens, board, max_think_time):
     """Parse time control from 'go' command tokens."""
     wtime = btime = winc = binc = movestogo = movetime = depth = None
     infinite = False
-    
+
     for i, tok in enumerate(tokens):
-        if tok == "wtime" and i + 1 < len(tokens): wtime = int(tokens[i + 1])
-        elif tok == "btime" and i + 1 < len(tokens): btime = int(tokens[i + 1])
-        elif tok == "winc" and i + 1 < len(tokens): winc = int(tokens[i + 1])
-        elif tok == "binc" and i + 1 < len(tokens): binc = int(tokens[i + 1])
-        elif tok == "movestogo" and i + 1 < len(tokens): movestogo = int(tokens[i + 1])
-        elif tok == "movetime" and i + 1 < len(tokens): movetime = int(tokens[i + 1])
-        elif tok == "depth" and i + 1 < len(tokens): depth = int(tokens[i + 1])
+        if tok == "wtime" and i + 1 < len(tokens): wtime = _num(tokens[i + 1])
+        elif tok == "btime" and i + 1 < len(tokens): btime = _num(tokens[i + 1])
+        elif tok == "winc" and i + 1 < len(tokens): winc = _num(tokens[i + 1])
+        elif tok == "binc" and i + 1 < len(tokens): binc = _num(tokens[i + 1])
+        elif tok == "movestogo" and i + 1 < len(tokens): movestogo = _num(tokens[i + 1])
+        elif tok == "movetime" and i + 1 < len(tokens): movetime = _num(tokens[i + 1])
+        elif tok == "depth" and i + 1 < len(tokens): depth = _num(tokens[i + 1])
         elif tok == "nodes" and i + 1 < len(tokens): pass # Currently ignored, mapped to depth if needed
         elif tok == "infinite": infinite = True
 
@@ -244,14 +260,25 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
         raise
     except Exception as e:
         uci_print(f"info string Error in go command: {e}")
-        
-        # Only print fallback bestmove if this search is still current
+
+        # Emergency move selection: NEVER answer with an arbitrary first
+        # legal move when avoidable — try a fast tactical search first,
+        # then fall back to a uniformly random legal move.
         if not _superseded(search_id, state):
-            if list(board.legal_moves):
-                fallback_move = list(board.legal_moves)[0]
-                uci_print(f"bestmove {fallback_move.uci()}")
-            else:
+            legal = list(board.legal_moves)
+            if not legal:
                 uci_print("bestmove 0000")
+            else:
+                fb = None
+                try:
+                    cand = ab_filter.analyze(board)
+                    if cand.best_move in board.legal_moves:
+                        fb = cand.best_move
+                except Exception:
+                    fb = None
+                if fb is None:
+                    fb = random.choice(legal)
+                uci_print(f"bestmove {fb.uci()}")
     finally:
         mcts.is_searching = False
 
