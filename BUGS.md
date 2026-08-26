@@ -150,6 +150,14 @@ Verified post-upgrade: py_compile clean · tests 14/14 · UCI suite 9/9 ·
 mate-in-1 found in 0.5 s (Scholar's + back-rank) · clock game honors budget
 (2.4 s used of ~2.8 s allocated at 60+5).
 
+### Follow-up round (same day)
+
+| Item | Detail |
+|------|--------|
+| **Pondering support** | Full `go ponder` / `ponderhit` implementation: held bestmove delivered on hit (0.03 s), zero leaks when opponent deviates, stop-during-ponder still answers per spec. Un-pondered work is reused via the EPD TT + SF hash |
+| **benchmark.py** | Self-contained strength measurement vs pure Stockfish at fixed depth; smoke run W1/D1 (75%) at depth 2 |
+| Verification | py_compile · tests 14/14 · UCI suite 9/9 · ponder suite 7/7 · benchmark smoke |
+
 Verification battery at resolution time: `py_compile` clean · `alpha_beta.py`
 self-test 24/24 · `tests.py` 14/14 (6 skipped, no PyTorch) · UCI suite 9/9
 (handshake over buffered pipe, setoption before/during search, instant-stop

@@ -100,6 +100,21 @@ The engine supports `go movetime`, `go wtime/btime/winc/binc [+ movestogo]`,
 `go depth N` (mapped to a bounded think time) and `go infinite` (search until
 `stop`). Every `go`/`stop` pair is answered with exactly one `bestmove`.
 
+**Pondering** is supported (`go ponder` / `ponderhit`) — the engine thinks on
+the opponent's clock. Un-pondered thinking is never wasted: evaluations are
+cached (EPD-keyed transposition table + persistent Stockfish hash) and reused
+by the next search.
+
+## Measuring Strength
+
+```bash
+python benchmark.py --games 4 --movetime 300 --sf-depth 2 --max-plies 80
+```
+
+Plays alternating-color games of the hybrid engine against a *pure*
+`stockfish.exe` limited to a fixed depth, self-refereed (mate, draws,
+50-move, threefold, ply-cap adjudication), and prints a W/L/D summary.
+
 ## Training (Self-Play)
 
 The engine supports AlphaZero-style self-play training:

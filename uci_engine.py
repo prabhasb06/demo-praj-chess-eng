@@ -231,7 +231,14 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
             uci_print(f"info string Total search: {int(total_time*1000)}ms "
                        f"(AB={int(ab_elapsed*1000)}ms, "
                        f"MCTS={int((total_time-ab_elapsed)*1000)}ms)")
-            uci_print(f"bestmove {best_move.uci()}")
+            if state.get("ponder", False) and not state.get("stop_requested", False):
+                # Ponder search: hold the move until 'ponderhit'. All
+                # evaluations stay cached (EPD-keyed TT + Stockfish hash),
+                # so an un-pondered result is still fully reused later.
+                state["ponder_best"] = best_move.uci()
+                state["ponder_best_id"] = search_id
+            else:
+                uci_print(f"bestmove {best_move.uci()}")
         
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -323,7 +330,8 @@ def main():
 
     # Search bookkeeping: every 'go' increments the counter; only the search
     # whose ID matches the latest counter may print bestmove.
-    state = {"current_search_id": 0, "stop_requested": False}
+    state = {"current_search_id": 0, "stop_requested": False,
+             "ponder": False, "ponder_best": None, "ponder_best_id": -1}
     
     board = chess.Board()
     move_variety = False
@@ -407,12 +415,16 @@ def main():
             elif cmd == "ucinewgame":
                 abort_event.set()
                 mcts.abort_search = True
+                state["ponder"] = False
+                state["ponder_best"] = None
                 board = chess.Board()
                 mcts.transposition_table.clear()
                 
             elif cmd == "position":
                 abort_event.set()
                 mcts.abort_search = True
+                state["ponder"] = False
+                state["ponder_best"] = None
                 try:
                     if len(tokens) < 2:
                         continue
@@ -453,10 +465,11 @@ def main():
                     board = chess.Board()
                         
             elif cmd == "go":
-                if "ponder" in tokens:
-                    continue
                 # Clear stop flag
                 state["stop_requested"] = False
+                is_ponder = "ponder" in tokens
+                state["ponder"] = is_ponder
+                state["ponder_best"] = None
                 # Invalidate any in-flight search: it must not print bestmove.
                 abort_event.set()
                 mcts.abort_search = True
@@ -482,6 +495,16 @@ def main():
                 mcts.abort_search = True
                 break
                 
+            elif cmd == "ponderhit":
+                # Opponent played the predicted move: adopt the ponder search.
+                if state.pop("ponder", False):
+                    best = state.get("ponder_best")
+                    if best is not None and state.get("ponder_best_id") == state["current_search_id"]:
+                        state["ponder_best"] = None
+                        uci_print(f"bestmove {best}")
+                    # else: search still running — completion will print now
+                    #       that the ponder flag is cleared.
+
             elif cmd == "stop":
                 state["stop_requested"] = True
                 abort_event.set()
