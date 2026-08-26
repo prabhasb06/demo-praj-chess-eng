@@ -130,11 +130,17 @@ def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_varie
         abort_event: threading.Event — set by the main thread to signal abort.
                      Cleared only by this function when it starts a fresh search.
     """
-    # Only clear the abort flag if this search hasn't already been superseded
-    # AND no 'stop' is pending (a stop arriving between submit and execution
-    # must be honoured, not wiped — the search below will then finish with
-    # zero simulations and emit a fallback bestmove immediately).
-    if not _superseded(search_id, state) and not state.get("stop_requested", False):
+    # If this search was already superseded before it even started, bail out
+    # silently — a newer 'go' owns the bestmove obligation.
+    if _superseded(search_id, state):
+        return
+    # Only clear the abort flag if no 'stop' is pending.
+    if not state.get("stop_requested", False):
+        # Brief settling period: let the GUI finish processing the previous
+        # bestmove before we start emitting info lines for the new search.
+        time.sleep(0.02)
+        if _superseded(search_id, state):
+            return
         abort_event.clear()
         mcts.abort_search = False
     mcts.is_searching = True

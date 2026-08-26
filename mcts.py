@@ -582,6 +582,10 @@ class MCTS:
             
             # Print search info periodically (every 50 simulations or on completion)
             if (i + 1) % 50 == 0 or (i + 1) == self.num_simulations:
+                # Don't print info if search was aborted — stale PV lines
+                # confuse GUIs into briefly showing the wrong board state.
+                if self.abort_search:
+                    break
                 elapsed = max(1e-3, time.time() - start_time)
                 nps = int((i + 1) / elapsed)
                 time_ms = int(elapsed * 1000)
