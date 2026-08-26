@@ -134,9 +134,21 @@ Verification: static review of all modules + empirical runs
 | BUG-8 mobility double enumeration | PARTIAL | this commit — single enumeration per leaf; single-side tempo bias kept intentionally (cheap eval) |
 | BUG-9 TT keyed on clocks | FIXED | this commit — cache key now `board.epd()` |
 | BUG-10 stale board on bad position | FIXED | this commit — revert to startpos on parse failure |
-| BUG-11 repetition choices in tree | DOCUMENTED | scoring is already correct via `claim_draw=True`; avoiding repetition *choices* is a strength enhancement, not a bug fix — left as future work |
+| BUG-11 repetition choices in tree | PARTIALLY ADDRESSED | scoring was already correct via `claim_draw=True`; this commit adds a **root repetition guard** (priors of moves that instantly recreate a threefold are crushed ×10⁻³, so draws only happen when nothing better exists). Full repetition avoidance remains future work |
 | BUG-12 SF pipe unusable after timeout | FIXED | this commit — `stop` sent on timeout, blocked reader drains and exits |
 | README mismatches | FIXED | this commit — URL, defaults, AB-filter wording, time-control section |
+
+### Strength upgrades (hybrid architecture preserved — MCTS decides, Stockfish advises)
+
+| Upgrade | Detail |
+|---------|--------|
+| Mate-distance-aware values | Forced mates now map to `±(1.0 … 0.92)` by distance-to-mate instead of flattening to ±1.0 — the engine prefers the *shortest* mate |
+| Root repetition guard | See BUG-11 above |
+| Stockfish Hash 256 MB | SF's transposition table persists across our repeated queries (default was 16 MB) — deeper advice per simulation at no protocol cost |
+
+Verified post-upgrade: py_compile clean · tests 14/14 · UCI suite 9/9 ·
+mate-in-1 found in 0.5 s (Scholar's + back-rank) · clock game honors budget
+(2.4 s used of ~2.8 s allocated at 60+5).
 
 Verification battery at resolution time: `py_compile` clean · `alpha_beta.py`
 self-test 24/24 · `tests.py` 14/14 (6 skipped, no PyTorch) · UCI suite 9/9

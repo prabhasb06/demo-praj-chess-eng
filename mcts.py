@@ -166,6 +166,10 @@ class SubprocessStockfish:
             )
             self.send("uci")
             self.read_until("uciok", timeout=10.0)
+            # Persistent transposition hash: SF keeps its TT across our
+            # repeated depth-N queries, so a real table makes every MCTS
+            # simulation's advice cheaper and deeper. Default is only 16 MB.
+            self.send("setoption name Hash value 256")
             self.send("isready")
             self.read_until("readyok", timeout=10.0)
         except Exception as e:
@@ -306,6 +310,8 @@ class StockfishEvaluator(EvaluatorBase):
             move_scores_dict = {}
             best_eval = 0
             best_eval_set = False
+            best_is_mate = False
+            best_mate_dist = 0
 
             for line in lines:
                 if line.startswith("info"):
@@ -320,6 +326,8 @@ class StockfishEvaluator(EvaluatorBase):
 
                     # Extract score
                     score_val = 0
+                    score_type = "cp"
+                    score_value_str = "0"
                     if "score" in tokens:
                         score_idx = tokens.index("score") + 1
                         if score_idx + 1 < len(tokens):
@@ -351,14 +359,25 @@ class StockfishEvaluator(EvaluatorBase):
                     if multipv == 1:
                         best_eval = score_val
                         best_eval_set = True
+                        best_is_mate = (score_type == "mate")
+                        try:
+                            best_mate_dist = abs(int(score_value_str)) if best_is_mate else 0
+                        except Exception:
+                            best_mate_dist = 0
 
             if not best_eval_set:
                 return self._heuristic_evaluate(board)
 
             move_scores = list(move_scores_dict.items())
 
-            # Map score to value in [-1, 1] using tanh
-            value = math.tanh(best_eval / 200.0)
+            # Map score to value in [-1, 1]. Mate scores keep their distance:
+            # a forced mate-in-2 must outrank a mate-in-8 (tanh would flatten
+            # both to ±1.0 and lose that ordering).
+            if best_is_mate:
+                proximity = 1.0 - (min(best_mate_dist, 60) / 60.0) * 0.08  # 1.0 .. 0.92
+                value = proximity if best_eval > 0 else -proximity
+            else:
+                value = math.tanh(best_eval / 200.0)
 
             # Get policy priors from moves evaluated
             policy_probs = np.zeros(4096, dtype=np.float32)
@@ -536,6 +555,21 @@ class MCTS:
             policy = policy / np.sum(policy)
 
         root.expand(policy, legal_mask, board)
+
+        # 1d. Root repetition guard: a move that instantly recreates a
+        # threefold repetition (against real game history) is scored as a
+        # draw inside the tree, but with shallow searches the engine may
+        # still drift into it while winning. Crush such priors so the
+        # choice is only made when nothing better exists.
+        if len(legal_moves) > 0:
+            rep_board = board.copy()
+            for child in root.children.values():
+                if child.move is None:
+                    continue
+                rep_board.push(child.move)
+                if rep_board.is_repetition(3):
+                    child.prior *= 1e-3
+                rep_board.pop()
 
         # 2. Run simulations
         start_time = time.time()
