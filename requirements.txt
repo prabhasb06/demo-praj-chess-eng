@@ -1,3 +1,2 @@
-python-chess>=1.9.0
-numpy>=1.21.0
+-r requirements-engine.txt
 torch>=2.0.0

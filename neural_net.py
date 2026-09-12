@@ -8,11 +8,34 @@ and the multi-head outputs (Policy, Value, and Moves-Left).
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from board_encoder import POLICY_SIZE
 
 # Single source of truth for the network architecture. Training pipeline,
 # self-play and evaluation must all construct ChessNet with these values so
 # checkpoints always load. Input is the 18-plane encoding from board_encoder.
 DEFAULT_ARCH = {"num_blocks": 10, "filters": 128, "in_channels": 18}
+
+
+def load_checkpoint(model, path, device='cpu'):
+    """Load weights, migrating the old 4096-action policy head in memory.
+
+    New underpromotion rows start from the matching queen-promotion row.
+    The original checkpoint is never overwritten; further training is needed
+    to distinguish promotion choices in a migrated model.
+    """
+    from board_encoder import decode_move
+    import chess
+    state = torch.load(path, map_location=device, weights_only=True)
+    weight = state.get('fc_policy.weight')
+    if weight is not None and weight.shape[0] == 4096:
+        indices = list(range(4096))
+        for action in range(4096, POLICY_SIZE):
+            move = decode_move(action, chess.Board())
+            indices.append(move.from_square * 64 + move.to_square)
+        index = torch.tensor(indices, device=weight.device)
+        state['fc_policy.weight'] = weight[index].clone()
+        state['fc_policy.bias'] = state['fc_policy.bias'][index].clone()
+    model.load_state_dict(state)
 
 class SEBlock(nn.Module):
     """
@@ -24,9 +47,9 @@ class SEBlock(nn.Module):
         self.fc = nn.Sequential(
             nn.AdaptiveAvgPool2d(1), # Squeeze: global average pooling (B, C, 1, 1)
             nn.Flatten(),
-            nn.Linear(channels, channels // reduction, bias=False),
+            nn.Linear(channels, max(1, channels // reduction), bias=False),
             nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Linear(max(1, channels // reduction), channels, bias=False),
             nn.Sigmoid() # Excitation: channel-wise weights in [0, 1]
         )
 
@@ -86,7 +109,7 @@ class ChessNet(nn.Module):
         # Policy Head
         self.conv_policy = nn.Conv2d(filters, 32, kernel_size=1, bias=False)
         self.bn_policy = nn.BatchNorm2d(32)
-        self.fc_policy = nn.Linear(32 * 8 * 8, 4096)
+        self.fc_policy = nn.Linear(32 * 8 * 8, POLICY_SIZE)
 
         # Value Head (tanh)
         self.conv_value = nn.Conv2d(filters, 32, kernel_size=1, bias=False)

@@ -1,5 +1,9 @@
 # Praj MCTS Chess Engine — Bug Report
 
+> Historical August report. Its resolved claims were re-audited and several
+> additional defects were found. See [AUDIT_REPORT.md](AUDIT_REPORT.md) for the
+> September 2026 fixes, measured results, and remaining release limitations.
+
 > **STATUS: RESOLVED** — see [Resolution Log](#resolution-log) at the bottom.
 > All critical/medium items fixed and empirically verified (9/9 UCI protocol tests).
 

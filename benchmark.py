@@ -1,153 +1,107 @@
-"""
-benchmark.py — Measure the hybrid engine's playing strength.
-
-Plays N games: Praj hybrid (python uci_engine.py) VS pure stockfish.exe
-limited to a fixed search depth. Alternates colors. Self-refereed with
-python-chess (mate / stalemate / insufficient material / 50-move /
-threefold / ply cap = draw).
-
-Usage:
-    python benchmark.py --games 4 --movetime 300 --sf-depth 2 --max-plies 80
-"""
+"""Paired-opening UCI match harness with history, per-game resets and PGN/JSON results."""
 import argparse
-import chess
-import os
-import subprocess
+import json
+import pathlib
 import sys
-import threading
 import time
+from contextlib import ExitStack
+import chess
+import chess.engine
+import chess.pgn
 
-REPO = os.path.dirname(os.path.abspath(__file__))
-
-
-class UciProc:
-    def __init__(self, argv, cwd, name):
-        self.name = name
-        self.p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL, text=True)
-        self.lines = []
-        threading.Thread(target=self._reader, daemon=True).start()
-        self.send("uci")
-        self.wait(lambda l: l.startswith("uciok"), 15)
-        self.send("isready")
-        self.wait(lambda l: l.startswith("readyok"), 15)
-
-    def _reader(self):
-        for ln in self.p.stdout:
-            self.lines.append(ln.rstrip())
-
-    def send(self, cmd):
-        self.p.stdin.write(cmd + "\n")
-        self.p.stdin.flush()
-
-    def wait(self, pred, timeout):
-        end = time.time() + timeout
-        seen = 0
-        while time.time() < end:
-            fresh = self.lines[seen:]
-            seen = len(self.lines)
-            for ln in fresh:
-                if pred(ln):
-                    return True
-            time.sleep(0.02)
-        return False
-
-    def bestmove(self, go_cmd, timeout=120.0):
-        marker = len(self.lines)
-        self.send(go_cmd)
-        end = time.time() + timeout
-        while time.time() < end:
-            for ln in self.lines[marker:]:
-                if ln.startswith("bestmove"):
-                    tok = ln.split()[1]
-                    return None if tok == "0000" else chess.Move.from_uci(tok)
-            time.sleep(0.02)
-        return None
-
-    def quit(self):
-        try:
-            self.send("quit")
-            self.p.wait(timeout=5)
-        except Exception:
-            self.p.kill()
+OPENINGS = [
+    "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6",
+    "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6",
+    "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4",
+    "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7",
+    "c2c4 e7e5 b1c3 g8f6 g2g3 d7d5",
+    "e2e4 e7e6 d2d4 d7d5 b1c3 g8f6",
+]
 
 
-def play_game(eng, sf, sf_depth, movetime_ms, max_plies, eng_white):
-    board = chess.Board()
-    plies = 0
-    start_fen = board.fen()
-
-    for p, is_eng in ((eng, eng_white), (sf, not eng_white)):
-        p.send(f"position startpos")
-    # engine gets full position command each move; stockfish likewise
-
-    while not board.is_game_over(claim_draw=True) and plies < max_plies:
-        if board.turn == chess.WHITE:
-            mover = eng if eng_white else sf
-        else:
-            mover = sf if eng_white else eng
-
-        pos_cmd = f"position fen {board.fen()}"
-        mover.send(pos_cmd)
-        if mover is sf:
-            mv = mover.bestmove(f"go depth {sf_depth}", timeout=60)
-        else:
-            mv = mover.bestmove(f"go movetime {movetime_ms}", timeout=60 + movetime_ms / 100)
-
-        if mv is None or mv not in board.legal_moves:
-            return ("illegal/timeout loss", board)
-
-        board.push(mv)
-        plies += 1
-
-    outcome = board.outcome(claim_draw=True)
-    if outcome is None:
-        return ("draw-plycap", board)
-    if outcome.winner is None:
-        return ("draw", board)
-    winner_is_engine = (outcome.winner == chess.WHITE) == eng_white
-    return ("engine-win" if winner_is_engine else "sf-win", board)
+def command(directory):
+    return [sys.executable, str(pathlib.Path(directory).resolve() / "uci_engine.py")]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--games", type=int, default=4, help="total games (alternating colors)")
-    ap.add_argument("--movetime", type=int, default=300, help="engine movetime ms")
-    ap.add_argument("--sf-depth", type=int, default=2, help="pure Stockfish fixed depth")
-    ap.add_argument("--max-plies", type=int, default=80, help="adjudicate draw after N plies")
-    args = ap.parse_args()
-
-    eng = UciProc([sys.executable, "uci_engine.py"], REPO, "Praj-Hybrid")
-    sf_bin = os.path.join(REPO, "stockfish.exe")
-    sf = UciProc([sf_bin], REPO, f"Stockfish-d{args.sf_depth}")
-
-    tally = {"engine-win": 0, "sf-win": 0, "draw": 0}
-    t0 = time.time()
-    try:
-        for g in range(args.games):
-            eng_white = (g % 2 == 0)
-            result, final_board = play_game(eng, sf, args.sf_depth,
-                                            args.movetime, args.max_plies, eng_white)
-            key = result if result in tally else ("draw" if result.startswith("draw") else result)
-            if key == "illegal/timeout loss":
-                key = "sf-win"
-            tally[key] += 1
-            print(f"game {g+1}: engine={'W' if eng_white else 'B'} -> {result} "
-                  f"({final_board.fen().split()[0][:30]}...) "
-                  f"[W {tally['engine-win']} / L {tally['sf-win']} / D {tally['draw']}]",
-                  flush=True)
-    finally:
-        eng.quit()
-        sf.quit()
-
-    n = max(1, sum(tally.values()))
-    score = (tally["engine-win"] * 1.0 + tally["draw"] * 0.5) / n
-    print("=" * 50)
-    print(f"RESULT vs Stockfish depth {args.sf_depth}: "
-          f"W {tally['engine-win']} / L {tally['sf-win']} / D {tally['draw']}  "
-          f"score {score:.0%}  ({time.time()-t0:.0f}s)")
+def match(engine_dir, opponent_dir, games, movetime, sf_depth, max_plies, output):
+    rows, pgns = [], []
+    with ExitStack() as stack:
+        engine = stack.enter_context(chess.engine.SimpleEngine.popen_uci(command(engine_dir), timeout=5))
+        rival_cmd = command(opponent_dir) if opponent_dir else str(pathlib.Path(engine_dir).resolve() / "stockfish.exe")
+        rival = stack.enter_context(chess.engine.SimpleEngine.popen_uci(rival_cmd, timeout=5))
+        if not opponent_dir:
+            rival.configure({"Threads": 1, "Hash": 64})
+        for game_number in range(games):
+            board = chess.Board()
+            for token in OPENINGS[(game_number // 2) % len(OPENINGS)].split():
+                board.push_uci(token)
+            initial = board.copy()
+            white = game_number % 2 == 0
+            game_id = object()
+            reason, score = None, None
+            times = []
+            start = time.monotonic()
+            while board.ply() < max_plies and not board.is_game_over(claim_draw=True):
+                current = engine if board.turn == white else rival
+                limit = (chess.engine.Limit(time=movetime / 1000)
+                         if current is engine or opponent_dir else chess.engine.Limit(depth=sf_depth))
+                tick = time.monotonic()
+                try:
+                    result = current.play(board, limit, game=game_id)
+                    elapsed = (time.monotonic() - tick) * 1000
+                    if result.move not in board.legal_moves:
+                        raise ValueError("Illegal/null move in playable position")
+                    if current is engine:
+                        times.append(elapsed)
+                    board.push(result.move)
+                except (chess.engine.EngineError, TimeoutError, ValueError) as error:
+                    score = 0.0 if current is engine else 1.0
+                    reason = f"{'engine' if current is engine else 'opponent'} failure: {error}"
+                    break
+            if score is None:
+                outcome = board.outcome(claim_draw=True)
+                if outcome is None:
+                    reason, score = "ply-cap (adjudicated draw; not a proven chess draw)", 0.5
+                elif outcome.winner is None:
+                    reason, score = outcome.termination.name, 0.5
+                else:
+                    reason, score = outcome.termination.name, float(outcome.winner == white)
+            game = chess.pgn.Game.from_board(board)
+            game.headers["White"] = "candidate" if white else "baseline"
+            game.headers["Black"] = "baseline" if white else "candidate"
+            game.headers["Result"] = ("1/2-1/2" if score == 0.5 else
+                                     "1-0" if (score == 1) == white else "0-1")
+            game.headers["Termination"] = reason
+            game.headers["TimeControl"] = f"{movetime}ms per move"
+            pgns.append(str(game))
+            row = dict(game=game_number+1, candidate_white=white, opening=initial.fen(),
+                       score=score, reason=reason, plies=board.ply(),
+                       seconds=round(time.monotonic()-start, 2),
+                       max_candidate_ms=round(max(times, default=0), 2))
+            rows.append(row)
+            print(json.dumps(row), flush=True)
+            # Persist after every game so interrupted experiments retain evidence.
+            report = dict(games=rows, movetime_ms=movetime, opponent=opponent_dir or f"Stockfish depth {sf_depth}",
+                          wins=sum(r["score"] == 1 for r in rows),
+                          draws=sum(r["score"] == 0.5 for r in rows),
+                          losses=sum(r["score"] == 0 for r in rows),
+                          score=sum(r["score"] for r in rows) / len(rows))
+            pathlib.Path(output).write_text(json.dumps(report, indent=2), encoding="utf-8")
+            pathlib.Path(output).with_suffix(".pgn").write_text("\n\n".join(pgns), encoding="utf-8")
+    return report
 
 
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--engine-dir", default=str(pathlib.Path(__file__).parent))
+    ap.add_argument("--opponent-dir")
+    ap.add_argument("--games", type=int, default=12)
+    ap.add_argument("--movetime", type=int, default=150)
+    ap.add_argument("--sf-depth", type=int, default=2)
+    ap.add_argument("--max-plies", type=int, default=240)
+    ap.add_argument("--output", default="match_results.json")
+    args = ap.parse_args()
+    if args.games <= 0 or args.movetime <= 0 or args.max_plies <= 6:
+        ap.error("games/movetime must be positive and max-plies greater than 6")
+    print(json.dumps(match(args.engine_dir, args.opponent_dir, args.games, args.movetime,
+                           args.sf_depth, args.max_plies, args.output)), flush=True)

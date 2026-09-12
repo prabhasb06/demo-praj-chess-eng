@@ -220,7 +220,7 @@ def evaluate_board(board: chess.Board, mobility: int = None) -> int:
         # The side to move is checkmated → worst possible score
         return -MATE_SCORE
 
-    if board.is_insufficient_material():
+    if board.is_stalemate() or board.is_insufficient_material() or board.is_seventyfive_moves() or board.is_fivefold_repetition():
         return 0
     if not any(board.legal_moves):
         return 0  # Stalemate (checkmate already handled above)
@@ -387,7 +387,7 @@ def quiescence(board: chess.Board, alpha: int, beta: int, depth_limit: int = 6,
         # Prefer shorter mates: deeper mates score slightly worse
         return -(MATE_SCORE - ply)
 
-    if board.is_insufficient_material():
+    if board.is_stalemate() or board.is_insufficient_material() or board.is_seventyfive_moves() or board.is_fivefold_repetition():
         return 0
 
     in_check = board.is_check()
@@ -397,6 +397,17 @@ def quiescence(board: chess.Board, alpha: int, beta: int, depth_limit: int = 6,
     stand_pat = evaluate_board(board, mobility=len(all_moves))
 
     if depth_limit <= -4:
+        if in_check:
+            # At the hard horizon, evaluate legal evasions rather than allowing
+            # the checked side to stand pat in an illegal position.
+            scores = []
+            for move in all_moves:
+                board.push(move)
+                try:
+                    scores.append(-evaluate_board(board))
+                finally:
+                    board.pop()
+            return max(scores)
         return stand_pat
 
     if not in_check:
@@ -472,7 +483,7 @@ def alpha_beta(
     if board.is_checkmate():
         return -(MATE_SCORE - ply), None
 
-    if board.is_insufficient_material() or board.is_fifty_moves():
+    if board.is_stalemate() or board.is_insufficient_material() or board.is_seventyfive_moves() or board.is_fivefold_repetition():
         return 0, None
 
     # Leaf node → quiescence search
@@ -641,7 +652,7 @@ class AlphaBetaFilter:
             if score <= best_alpha - research_window:
                 # Still far below best — use a quick static eval as estimate
                 board.push(move)
-                score = -evaluate_board(board)
+                score = min(best_alpha - research_window, -evaluate_board(board))
                 board.pop()
 
             move_scores.append((move, score))

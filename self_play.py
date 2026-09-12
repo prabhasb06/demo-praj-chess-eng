@@ -13,8 +13,8 @@ import torch
 import torch.optim as optim
 import chess
 
-from board_encoder import encode_board, decode_move
-from neural_net import ChessNet, DEFAULT_ARCH, compute_loss
+from board_encoder import POLICY_SIZE, encode_board, decode_move, encode_move_for_perspective
+from neural_net import ChessNet, DEFAULT_ARCH, compute_loss, load_checkpoint
 from mcts import MCTS, NeuralNetEvaluator
 
 class ReplayBuffer:
@@ -33,7 +33,9 @@ class ReplayBuffer:
 
     def sample_batch(self, batch_size: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Samples a mini-batch of transitions, formatted as PyTorch Tensors."""
-        batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
+        if batch_size <= 0 or not self.buffer:
+            raise ValueError('A positive batch size and nonempty replay buffer are required')
+        batch = random.sample(list(self.buffer), min(batch_size, len(self.buffer)))
         
         states, policies, values, moves_left = zip(*batch)
         
@@ -50,9 +52,13 @@ class ReplayBuffer:
 
 def _mirror_policy(policy: np.ndarray) -> np.ndarray:
     """Mirror a 4096-element policy vector from original action space to mirrored action space."""
-    mirrored = np.zeros(4096, dtype=np.float32)
-    for action in range(4096):
+    mirrored = np.zeros(POLICY_SIZE, dtype=np.float32)
+    for action in range(POLICY_SIZE):
         if policy[action] > 0:
+            if action >= 4096:
+                move = decode_move(action, chess.Board())
+                mirrored[encode_move_for_perspective(move, True)] = policy[action]
+                continue
             from_sq = chess.square_mirror(action // 64)
             to_sq = chess.square_mirror(action % 64)
             mirrored[from_sq * 64 + to_sq] = policy[action]
@@ -93,7 +99,7 @@ def play_game(mcts: MCTS, temp_threshold: int = 30) -> List[Tuple[np.ndarray, np
         game_history.append((encoded_state, training_policy, board.turn, move_count))
         
         # Select action (in original action space for board.push)
-        action = np.random.choice(4096, p=policy)
+        action = np.random.choice(POLICY_SIZE, p=policy)
         move = decode_move(action, board)
         
         # Execute move
@@ -172,6 +178,8 @@ def run_self_play_training(model_path: str = "best_model.pt",
         batch_size: Mini-batch size (clamped to the buffer size).
         num_sims: MCTS simulations per move during self-play.
     """
+    if min(num_games, num_epochs, batch_size, num_sims) <= 0:
+        raise ValueError('Training counts and batch size must be positive')
     if out_path is None:
         out_path = model_path
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -182,7 +190,7 @@ def run_self_play_training(model_path: str = "best_model.pt",
     if os.path.exists(model_path):
         print(f"Loading existing network from {model_path}")
         model = ChessNet(**DEFAULT_ARCH)
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        load_checkpoint(model, model_path, device)
     else:
         print(f"Creating a new {DEFAULT_ARCH['num_blocks']}-block model.")
         model = ChessNet(**DEFAULT_ARCH)
@@ -201,11 +209,18 @@ def run_self_play_training(model_path: str = "best_model.pt",
             buffer.add(state, policy, value, ml)
 
     # Network training
-    if len(buffer) >= batch_size:
+    if len(buffer) > 0:
         print(f"Training on buffer of size {len(buffer)} for {num_epochs} epochs...")
         for epoch in range(num_epochs):
-            states, policies, values, moves = buffer.sample_batch(batch_size)
-            loss_val = train_step(model, optimizer, states, policies, values, moves, device=device)
+            examples = list(buffer.buffer)
+            random.shuffle(examples)
+            losses = []
+            for start in range(0, len(examples), batch_size):
+                batch = examples[start:start + batch_size]
+                states, policies, values, moves = [torch.as_tensor(np.array(items), dtype=torch.float32)
+                                                   for items in zip(*batch)]
+                losses.append(train_step(model, optimizer, states, policies, values, moves, device=device))
+            loss_val = sum(losses) / len(losses)
             print(f"  Epoch {epoch+1}/{num_epochs} Loss: {loss_val:.4f}")
 
         # Save checkpoint to out_path (NOT necessarily overwriting model_path)

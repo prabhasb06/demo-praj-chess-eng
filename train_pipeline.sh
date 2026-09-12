@@ -11,6 +11,7 @@ set -e
 
 # Configuration — directory of this script, so it works from any CWD
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "${PROJECT_DIR}"
 MODEL_DIR="${PROJECT_DIR}/models"
 DATA_DIR="${PROJECT_DIR}/data"
 BEST_MODEL="${MODEL_DIR}/best_model.pt"
@@ -39,7 +40,7 @@ if [ ! -f "${BEST_MODEL}" ]; then
     echo "No best model found. Initializing a new model with random weights..."
     python - "${BEST_MODEL}" <<'PYEOF'
 import sys, torch
-from neural_net import ChessNet, DEFAULT_ARCH
+from neural_net import ChessNet, DEFAULT_ARCH, load_checkpoint
 model = ChessNet(**DEFAULT_ARCH)
 torch.save(model.state_dict(), sys.argv[1])
 PYEOF
@@ -74,18 +75,18 @@ PYEOF
     echo "[Phase 2] Evaluating Candidate Model vs. Current Best Model..."
     PROMOTION_CHECK=$(python - "${CANDIDATE_MODEL}" "${BEST_MODEL}" "${EVAL_GAMES}" "${EVAL_SIMS}" <<'PYEOF'
 import sys, torch
-from neural_net import ChessNet, DEFAULT_ARCH
+from neural_net import ChessNet, DEFAULT_ARCH, load_checkpoint
 from mcts import NeuralNetEvaluator
 from evaluator import evaluate_candidate
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 candidate_net = ChessNet(**DEFAULT_ARCH).to(device)
-candidate_net.load_state_dict(torch.load(sys.argv[1], map_location=device))
+load_checkpoint(candidate_net, sys.argv[1], device)
 candidate_eval = NeuralNetEvaluator(candidate_net, device=device)
 
 best_net = ChessNet(**DEFAULT_ARCH).to(device)
-best_net.load_state_dict(torch.load(sys.argv[2], map_location=device))
+load_checkpoint(best_net, sys.argv[2], device)
 best_eval = NeuralNetEvaluator(best_net, device=device)
 
 win_rate, elo, promoted = evaluate_candidate(
@@ -100,7 +101,7 @@ PYEOF
 )
 
     # 3. Handle Promotion
-    if [ "${PROMOTION_CHECK}" = "PROMOTE" ]; then
+    if [ "${PROMOTION_CHECK##*$'\n'}" = "PROMOTE" ]; then
         echo "[Phase 3] SUCCESS: Candidate promoted! Updating best model."
         cp "${CANDIDATE_MODEL}" "${BEST_MODEL}"
         # Keep a history of promoted checkpoints

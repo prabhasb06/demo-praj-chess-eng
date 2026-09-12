@@ -1,0 +1,130 @@
+{
+  "games": [
+    {
+      "game": 1,
+      "candidate_white": true,
+      "opening": "r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 59,
+      "seconds": 8.9,
+      "max_candidate_ms": 161.67
+    },
+    {
+      "game": 2,
+      "candidate_white": false,
+      "opening": "r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 46,
+      "seconds": 6.46,
+      "max_candidate_ms": 158.15
+    },
+    {
+      "game": 3,
+      "candidate_white": true,
+      "opening": "rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 61,
+      "seconds": 8.82,
+      "max_candidate_ms": 163.84
+    },
+    {
+      "game": 4,
+      "candidate_white": false,
+      "opening": "rnbqkb1r/ppp2ppp/4pn2/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 52,
+      "seconds": 7.67,
+      "max_candidate_ms": 158.41
+    },
+    {
+      "game": 5,
+      "candidate_white": true,
+      "opening": "rnbqkbnr/pp2pppp/3p4/8/3pP3/5N2/PPP2PPP/RNBQKB1R w KQkq - 0 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 41,
+      "seconds": 5.79,
+      "max_candidate_ms": 165.98
+    },
+    {
+      "game": 6,
+      "candidate_white": false,
+      "opening": "rnbqkbnr/pp2pppp/3p4/8/3pP3/5N2/PPP2PPP/RNBQKB1R w KQkq - 0 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 50,
+      "seconds": 6.89,
+      "max_candidate_ms": 155.8
+    },
+    {
+      "game": 7,
+      "candidate_white": true,
+      "opening": "rnbqk2r/ppppppbp/5np1/8/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 45,
+      "seconds": 6.31,
+      "max_candidate_ms": 158.13
+    },
+    {
+      "game": 8,
+      "candidate_white": false,
+      "opening": "rnbqk2r/ppppppbp/5np1/8/2PP4/2N5/PP2PPPP/R1BQKBNR w KQkq - 2 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 38,
+      "seconds": 5.01,
+      "max_candidate_ms": 158.97
+    },
+    {
+      "game": 9,
+      "candidate_white": true,
+      "opening": "rnbqkb1r/ppp2ppp/5n2/3pp3/2P5/2N3P1/PP1PPP1P/R1BQKBNR w KQkq - 0 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 45,
+      "seconds": 6.31,
+      "max_candidate_ms": 160.59
+    },
+    {
+      "game": 10,
+      "candidate_white": false,
+      "opening": "rnbqkb1r/ppp2ppp/5n2/3pp3/2P5/2N3P1/PP1PPP1P/R1BQKBNR w KQkq - 0 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 44,
+      "seconds": 6.17,
+      "max_candidate_ms": 161.11
+    },
+    {
+      "game": 11,
+      "candidate_white": true,
+      "opening": "rnbqkb1r/ppp2ppp/4pn2/3p4/3PP3/2N5/PPP2PPP/R1BQKBNR w KQkq - 2 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 75,
+      "seconds": 11.5,
+      "max_candidate_ms": 155.48
+    },
+    {
+      "game": 12,
+      "candidate_white": false,
+      "opening": "rnbqkb1r/ppp2ppp/4pn2/3p4/3PP3/2N5/PPP2PPP/R1BQKBNR w KQkq - 2 4",
+      "score": 1.0,
+      "reason": "CHECKMATE",
+      "plies": 38,
+      "seconds": 5.68,
+      "max_candidate_ms": 163.82
+    }
+  ],
+  "movetime_ms": 150,
+  "opponent": "C:\\Users\\prabh\\chess_engine_audit_baseline_20260912",
+  "wins": 12,
+  "draws": 0,
+  "losses": 0,
+  "score": 1.0
+}

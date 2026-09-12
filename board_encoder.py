@@ -26,6 +26,8 @@ import chess
 # constant plane would carry zero information.
 
 PIECE_TYPES = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
+POLICY_SIZE = 4480
+UNDERPROMOTIONS = (chess.KNIGHT, chess.BISHOP, chess.ROOK)
 
 def encode_board(board: chess.Board) -> np.ndarray:
     """
@@ -34,7 +36,7 @@ def encode_board(board: chess.Board) -> np.ndarray:
     """
     # 1. Perspective flipping: if Black's turn, mirror the board
     is_black = (board.turn == chess.BLACK)
-    working_board = board.mirror() if is_black else board.copy()
+    working_board = board.mirror() if is_black else board.copy(stack=False)
 
     # Initialize tensor of shape (18, 8, 8)
     tensor = np.zeros((18, 8, 8), dtype=np.float32)
@@ -93,6 +95,10 @@ def encode_move(move: chess.Move) -> int:
     Note: Underpromotions are implicitly mapped to this coordinate grid.
     For execution/decoding, we reconstruct the chess.Move object.
     """
+    if move.promotion in UNDERPROMOTIONS:
+        color_offset = 0 if chess.square_rank(move.to_square) == 7 else 192
+        return (4096 + color_offset + chess.square_file(move.from_square) * 24
+                + chess.square_file(move.to_square) * 3 + UNDERPROMOTIONS.index(move.promotion))
     return move.from_square * 64 + move.to_square
 
 
@@ -107,7 +113,7 @@ def encode_move_for_perspective(move: chess.Move, is_black: bool) -> int:
     else:
         from_sq = move.from_square
         to_sq = move.to_square
-    return from_sq * 64 + to_sq
+    return encode_move(chess.Move(from_sq, to_sq, promotion=move.promotion))
 
 
 def decode_move(action: int, board: chess.Board) -> chess.Move:
@@ -116,6 +122,15 @@ def decode_move(action: int, board: chess.Board) -> chess.Move:
     Requires the current board to determine if the move is a promotion.
     Checks all legal promotions for the from/to pair and defaults to Queen.
     """
+    if not 0 <= action < POLICY_SIZE:
+        raise ValueError('Action outside policy space')
+    if action >= 4096:
+        black, offset = divmod(action - 4096, 192)
+        from_file, offset = divmod(offset, 24)
+        to_file, promotion = divmod(offset, 3)
+        return chess.Move(chess.square(from_file, 1 if black else 6),
+                          chess.square(to_file, 0 if black else 7),
+                          promotion=UNDERPROMOTIONS[promotion])
     from_square = action // 64
     to_square = action % 64
 
@@ -154,7 +169,9 @@ def decode_move_for_perspective(action: int, board: chess.Board) -> chess.Move:
         from_square = chess.square_mirror(from_square)
         to_square = chess.square_mirror(to_square)
 
-    # Re-encode as a standard action and use the standard decoder
+    if action >= 4096:
+        move = decode_move(action, board.mirror() if board.turn == chess.BLACK else board)
+        return mirror_move(move) if board.turn == chess.BLACK else move
     return decode_move(from_square * 64 + to_square, board)
 
 
@@ -163,7 +180,7 @@ def get_legal_move_mask(board: chess.Board) -> np.ndarray:
     Returns a boolean mask of shape (4096,) where True represents legal moves.
     Uses raw square indices (no perspective mirroring).
     """
-    mask = np.zeros(4096, dtype=bool)
+    mask = np.zeros(POLICY_SIZE, dtype=bool)
     for move in board.legal_moves:
         action = encode_move(move)
         mask[action] = True
@@ -175,7 +192,7 @@ def get_legal_move_mask_for_perspective(board: chess.Board) -> np.ndarray:
     Returns a boolean mask of shape (4096,) in the perspective-mirrored action space.
     When it's Black's turn, move squares are mirrored to match the mirrored board encoding.
     """
-    mask = np.zeros(4096, dtype=bool)
+    mask = np.zeros(POLICY_SIZE, dtype=bool)
     is_black = (board.turn == chess.BLACK)
     for move in board.legal_moves:
         action = encode_move_for_perspective(move, is_black)

@@ -29,7 +29,7 @@ from board_encoder import encode_move
 # Data structures
 # ---------------------------------------------------------------------------
 
-@dataclass
+@dataclass(frozen=True)
 class DifficultyParams:
     """All search parameters controlled by difficulty level.
 
@@ -298,7 +298,7 @@ def select_move_with_variety(
         return int(np.random.choice(best_indices))
 
     # Apply softmax with temperature.
-    logits = top_k_counts / params.temperature
+    logits = np.log(top_k_counts) / params.temperature
     # Numerical stability: subtract the max before exp.
     logits = logits - np.max(logits)
     exp_logits = np.exp(logits)

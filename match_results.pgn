@@ -1,0 +1,143 @@
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "candidate"]
+[Black "baseline"]
+[Result "1-0"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nge7 5. Nc3 Rg8 6. Bb3 g5 7. d4 exd4 8. Nxg5 Rxg5 9. Bxg5 dxc3 10. Qf3 d5 11. Bxd5 Ne5 12. Qxc3 Bg7 13. O-O-O Nxd5 14. Qg3 f6 15. Bh4 Kf8 16. f4 Nc4 17. Rxd5 Qe7 18. Rd4 Qb4 19. Rd8+ Kf7 20. Bxf6 Kxf6 21. Qg5+ Kf7 22. Qh5+ Ke6 23. Re8+ Kd7 24. Qf7+ Kc6 25. Qxg7 Qd2+ 26. Kb1 b5 27. Qg8 Qd4 28. Qh8 Qe3 29. Rxc8 Nxb2 30. Rxa8 Nd1 31. Rxa6+ Qb6 32. Qe8+ Kc5 33. Qe5+ Kc6 34. Qd5# 1-0
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "baseline"]
+[Black "candidate"]
+[Result "0-1"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Bxc6 dxc6 5. Ng5 Qxg5 6. Nc3 Qxg2 7. Qe2 Qxh1+ 8. Qf1 Qxf1+ 9. Kxf1 Bd6 10. a3 Bg4 11. Rb1 Ne7 12. Ra1 a5 13. Rb1 f5 14. Ra1 O-O 15. Rb1 a4 16. Ra1 h6 17. Rb1 Bh3+ 18. Ke1 fxe4 19. Ra1 e3 20. Rb1 exf2+ 21. Ke2 f1=Q+ 22. Ke3 Qf3# 0-1
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "candidate"]
+[Black "baseline"]
+[Result "1-0"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Nf3 Rg8 5. cxd5 exd5 6. Bg5 c6 7. e4 dxe4 8. Ne5 Rh8 9. Qb3 Qe7 10. Bc4 Bf5 11. Bxf7+ Kd8 12. g4 Bxg4 13. Nxg4 a5 14. Rd1 e3 15. fxe3 a4 16. Qe6 Qxe6 17. Bxe6 a3 18. d5 cxd5 19. Nxf6 axb2 20. Nfxd5+ Be7 21. Bxe7+ Ke8 22. O-O g6 23. Nc7+ Kxe7 24. Rf7# 1-0
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "baseline"]
+[Black "candidate"]
+[Result "0-1"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Nxd5 exd5 5. Qa4+ Bd7 6. Bh6 Bxa4 7. Nf3 gxh6 8. Rb1 Bb4+ 9. Nd2 Ne4 10. Ra1 Bxd2# 0-1
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "candidate"]
+[Black "baseline"]
+[Result "1-0"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Nxd4 Nf6 5. Nc3 Bd7 6. f3 Rg8 7. g4 g6 8. Be3 a6 9. Nb3 b5 10. Qd2 Bg7 11. O-O-O b4 12. Nd5 Nxd5 13. exd5 a5 14. Kb1 Qc7 15. Re1 Kd8 16. Qf2 Bc8 17. Bb6 a4 18. Qe3 e5 19. dxe6 fxe6 20. Bxc7+ Kxc7 21. Nd4 a3 22. Nb5+ Kb7 23. Nxd6+ Kc6 24. Nc4 b3 25. Qb6+ Kd5 26. Qd6# 1-0
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "baseline"]
+[Black "candidate"]
+[Result "0-1"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. e4 c5 2. Nf3 d6 3. d4 cxd4 4. Ng5 Nc6 5. c3 dxc3 6. Nxc3 e6 7. Nb5 Nf6 8. Bf4 h6 9. Bxd6 Bxd6 10. Qxd6 Qxd6 11. Nxd6+ Ke7 12. Ngxf7 Rf8 13. f3 Rxf7 14. Rd1 Rf8 15. Rd2 Rd8 16. Kd1 Rxd6 17. Kc1 Rxd2 18. Kb1 a6 19. Ka1 Rd1# 0-1
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "candidate"]
+[Black "baseline"]
+[Result "1-0"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e4 d6 5. Nf3 O-O 6. h3 Kh8 7. Be3 Ng8 8. Be2 Bd7 9. Qd2 Qe8 10. b4 f5 11. Rd1 Nc6 12. b5 f4 13. Bxf4 Nxd4 14. Nxd4 e5 15. Be3 exd4 16. Bxd4 a6 17. b6 cxb6 18. Bxg7+ Kxg7 19. Qd4+ Kh6 20. g4 Qd8 21. h4 b5 22. g5+ Qxg5 23. hxg5+ Kxg5 24. Rh5+ gxh5 25. Qg7+ Kf4 26. Qg3# 1-0
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "baseline"]
+[Black "candidate"]
+[Result "0-1"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. Nd5 Nxd5 5. cxd5 O-O 6. e3 c6 7. dxc6 dxc6 8. h3 Be6 9. Ne2 c5 10. Nf4 Bf5 11. d5 Qb6 12. Nxg6 Qxg6 13. Bd2 h6 14. Rc1 Rd8 15. Rc4 Rxd5 16. Be2 Nc6 17. Qc1 Qxg2 18. Rf1 Ne5 19. a3 Nd3+ 20. Kd1 Nxb2+ 21. Qxb2 Bxb2 22. Ke1 Rxd2 23. Kxd2 Rd8+ 24. Ke1 Kh8 25. Bd1 Qd5 26. Bc2 Qd2# 0-1
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "candidate"]
+[Black "baseline"]
+[Result "1-0"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. c4 e5 2. Nc3 Nf6 3. g3 d5 4. cxd5 Nxd5 5. Bg2 Rg8 6. Bxd5 a5 7. Qb3 a4 8. Bxf7+ Ke7 9. Qc4 b5 10. Nxb5 c6 11. Bxg8 cxb5 12. Qd5 Ra5 13. Qxe5+ Kd7 14. Be6+ Kc6 15. Qxb8 a3 16. Bxc8 axb2 17. Bxb2 Rxa2 18. Qb7+ Kc5 19. Rc1+ Kb4 20. Qe4+ Kb3 21. Rc3+ Kxb2 22. Qc2+ Ka1 23. Qc1# 1-0
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "baseline"]
+[Black "candidate"]
+[Result "0-1"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. c4 e5 2. Nc3 Nf6 3. g3 d5 4. cxd5 Nxd5 5. Nxd5 Qxd5 6. Nf3 e4 7. Ng1 Nc6 8. Bg2 h5 9. Bxe4 Qxe4 10. Rb1 Qxh1 11. Ra1 Qxg1# 0-1
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "candidate"]
+[Black "baseline"]
+[Result "1-0"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. e4 e6 2. d4 d5 3. Nc3 Nf6 4. e5 Nfd7 5. f4 g6 6. Be3 c5 7. Nf3 Nc6 8. Qd2 a6 9. a3 cxd4 10. Nxd4 Nxd4 11. Bxd4 Bc5 12. O-O-O b5 13. Ne4 Bxa3 14. Nd6+ Bxd6 15. exd6 Rg8 16. h4 Nb8 17. Bc5 f5 18. Re1 b4 19. Qxd5 b3 20. Rxe6+ Bxe6 21. Qxe6+ Kf8 22. d7+ Kg7 23. Bd4+ Kh6 24. h5 bxc2 25. hxg6+ Qh4 26. Rxh4# 1-0
+
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "baseline"]
+[Black "candidate"]
+[Result "0-1"]
+[Termination "CHECKMATE"]
+[TimeControl "150ms per move"]
+
+1. e4 e6 2. d4 d5 3. Nc3 Nf6 4. Nxd5 exd5 5. Nf3 dxe4 6. Bc4 exf3 7. Bd2 fxg2 8. Rb1 gxh1=Q+ 9. Bf1 Qe4+ 10. Qe2 Qxe2+ 11. Kxe2 Qd5 12. Ra1 Nc6 13. Re1 Bg4+ 14. Kd3+ Be7 15. Ra1 Qxd4# 0-1

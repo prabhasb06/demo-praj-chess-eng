@@ -1,744 +1,435 @@
-"""
-MODULE 3: mcts.py
-Implements Monte Carlo Tree Search (MCTS) enhanced with neural policy/value heads,
-Dirichlet noise for exploration, an LRU transposition cache, optional wall-clock
-deadlines, and a Stockfish-guided evaluator.
-
-Note: simulations run serially on a single thread (the UCI worker pool is
-single-worker). There is intentionally no virtual-loss/lock machinery — it was
-dead overhead in a serial search.
-"""
-
+"""Serial MCTS with cancellable Stockfish advice and bounded sparse evaluation cache."""
 import math
+import queue
+import subprocess
 import sys
-import time
-from collections import OrderedDict
-from typing import Dict, Tuple, List, Optional
-import numpy as np
-import chess
-
 import threading
+import time
+import weakref
+from collections import OrderedDict
+
+import chess
+import numpy as np
+from board_encoder import (POLICY_SIZE, encode_board, encode_move, decode_move,
+                           encode_move_for_perspective, get_legal_move_mask)
+
 STDOUT_LOCK = threading.Lock()
+MAX_TT_ENTRIES = 8192
+MAX_TREE_NODES = 65536
+
+
 def uci_print(*args, **kwargs):
-    """Thread-safe, flushed write to stdout (safe for piped UCI output)."""
     with STDOUT_LOCK:
-        print(*args, **kwargs)
-        sys.stdout.flush()
-
-from board_encoder import (encode_board, encode_move,
-                           decode_move, get_legal_move_mask,
-                           get_legal_move_mask_for_perspective)
-
-# Maximum number of cached (policy, value) evaluations. Each entry is a 4096-float
-# policy (~16 KB), so this bounds cache memory at roughly 1 GB worst case; in
-# practice far less because entries are reused across moves within a game.
-MAX_TT_ENTRIES = 32768
+        print(*args, **kwargs, flush=True)
 
 
 class MCTSNode:
-    """
-    Represents a single node in the MCTS tree.
-    Tracks visit counts, total values, mean values and prior probabilities.
-    """
-    def __init__(self, prior: float, parent: Optional['MCTSNode'] = None, move: Optional[chess.Move] = None):
-        self.parent = parent
-        self.move = move
-        self.prior = prior  # P(s, a)
-        self.visit_count = 0  # N(s, a)
-        self.total_value = 0.0  # W(s, a)
-        self.mean_value = 0.0  # Q(s, a)
-        self.children: Dict[int, MCTSNode] = {}  # action_index -> MCTSNode
+    def __init__(self, prior, parent=None, move=None):
+        self.parent = weakref.proxy(parent) if parent is not None else None
+        self.move, self.prior = move, float(prior)
+        self.visit_count = 0
+        self.total_value = self.mean_value = 0.0
+        self.children = {}
 
     @property
-    def value(self) -> float:
-        """Returns Q(s,a)."""
-        if self.visit_count == 0:
-            return 0.0
-        return self.total_value / self.visit_count
+    def value(self):
+        return self.mean_value
 
-    def select_child(self, c_puct: float) -> Tuple[int, 'MCTSNode']:
-        """
-        Selects the child node that maximizes the PUCT formula:
-        U(s, a) = Q(s, a) + c_puct * P(s, a) * sqrt(N(s)) / (1 + N(s, a))
-        """
-        best_score = -float('inf')
-        best_action = -1
-        best_child = None
+    def select_child(self, c_puct):
+        scale = math.sqrt(max(1, self.visit_count))
+        return max(self.children.items(), key=lambda item:
+                   item[1].value + c_puct * item[1].prior * scale / (1 + item[1].visit_count))
 
-        # N(s) is this node's own visit count, maintained during backpropagation.
-        sqrt_total = math.sqrt(self.visit_count) if self.visit_count > 0 else 1.0
-
-        for action, child in self.children.items():
-            u = child.value + c_puct * child.prior * sqrt_total / (1.0 + child.visit_count)
-            if u > best_score:
-                best_score = u
-                best_action = action
-                best_child = child
-
-        return best_action, best_child
-
-    def expand(self, action_priors: np.ndarray, legal_mask: np.ndarray, board: chess.Board):
-        """
-        Expands the node by creating children for all legal actions.
-        action_priors: Array of size 4096 containing the moves' probabilities.
-        """
-        for action in range(4096):
+    def expand(self, action_priors, legal_mask, board):
+        for move in board.legal_moves:
+            action = encode_move(move)
             if legal_mask[action]:
-                prior = action_priors[action]
-                # Reconstruct move from action using decode_move to handle promotions correctly
-                move = decode_move(action, board)
-                self.children[action] = MCTSNode(prior=prior, parent=self, move=move)
+                self.children[action] = MCTSNode(action_priors[action], self, move)
 
-    def update(self, value: float):
-        """Backpropagates the value through this node."""
+    def update(self, value):
         self.visit_count += 1
         self.total_value += value
         self.mean_value = self.total_value / self.visit_count
 
 
 class EvaluatorBase:
-    """Base class for evaluating board positions (Policy & Value heads)."""
-    def evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
-        """Returns (policy_probs, value). policy_probs has shape (4096,)."""
-        raise NotImplementedError()
+    def evaluate(self, board):
+        raise NotImplementedError
+
 
 class NeuralNetEvaluator(EvaluatorBase):
-    """Evaluates positions using the PyTorch Squeeze-and-Excitation ResNet model."""
-    def __init__(self, model, device: str = "cpu"):
-        self.model = model
-        self.device = device
+    def __init__(self, model, device="cpu"):
+        self.model, self.device = model, device
         self.model.eval()
 
-    def evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
+    def evaluate(self, board):
         import torch
-        is_black = (board.turn == chess.BLACK)
-
-        # Encode board to 18-plane tensor (active player's perspective)
-        tensor = encode_board(board)
+        legal = list(board.legal_moves)
+        probs = np.zeros(POLICY_SIZE, dtype=np.float32)
+        if not legal:
+            return probs, -1.0 if board.is_checkmate() else 0.0
+        self.model.eval()
         with torch.no_grad():
-            tensor_t = torch.tensor(tensor, dtype=torch.float32, device=self.device).unsqueeze(0)  # (1, 18, 8, 8)
+            tensor = torch.as_tensor(encode_board(board), device=self.device).unsqueeze(0)
+            logits, value, _ = self.model(tensor)
+            logits = logits[0].cpu().numpy()
+        indices = [encode_move_for_perspective(m, board.turn == chess.BLACK) for m in legal]
+        scores = logits[indices].astype(np.float64)
+        weights = np.exp(scores - scores.max())
+        weights /= weights.sum()
+        for move, weight in zip(legal, weights):
+            probs[encode_move(move)] = weight
+        return probs, float(value.item())
 
-            # Forward pass
-            logits, value_t, _ = self.model(tensor_t)
-            logits = logits.squeeze(0).cpu().numpy()
-            value = float(value_t.item())  # value is in [-1, 1]
-
-        # Mask illegal moves using perspective-aware mask (matches mirrored board)
-        legal_mask = get_legal_move_mask_for_perspective(board)
-        masked_logits = np.where(legal_mask, logits, -1e9)
-        # Softmax computation
-        exp_logits = np.exp(masked_logits - np.max(masked_logits))
-        policy_probs_mirrored = exp_logits / np.sum(exp_logits)
-
-        # Unmirror the policy back to the original (non-mirrored) action space
-        # so callers can use standard encode_move() indices.
-        if is_black:
-            policy_probs = np.zeros(4096, dtype=np.float32)
-            for action_mirrored in range(4096):
-                if policy_probs_mirrored[action_mirrored] > 0:
-                    from_sq = chess.square_mirror(action_mirrored // 64)
-                    to_sq = chess.square_mirror(action_mirrored % 64)
-                    action_orig = from_sq * 64 + to_sq
-                    policy_probs[action_orig] = policy_probs_mirrored[action_mirrored]
-        else:
-            policy_probs = policy_probs_mirrored
-
-        return policy_probs, value
 
 class SubprocessStockfish:
-    """A lightweight, synchronous, and robust wrapper for Stockfish via subprocess."""
-    def __init__(self, path: str):
-        self.path = path
-        self.proc = None
+    """One reader owns stdout for the process lifetime; stop drains through bestmove."""
+    def __init__(self, path):
+        self.path, self.proc = path, None
+        self.lines = queue.Queue()
+        self.deadline = None
+        self.cancel = lambda: False
         self.reader_thread = None
-        self.start()
-
-    def start(self):
-        import subprocess
+        self.last_complete = False
         try:
-            self.proc = subprocess.Popen(
-                [self.path],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1
-            )
+            self.proc = subprocess.Popen([path] if isinstance(path, str) else path, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            self.reader_thread = threading.Thread(target=self._reader, args=(self.proc,), daemon=True)
+            self.reader_thread.start()
             self.send("uci")
-            self.read_until("uciok", timeout=10.0)
-            # Persistent transposition hash: SF keeps its TT across our
-            # repeated depth-N queries, so a real table makes every MCTS
-            # simulation's advice cheaper and deeper. Default is only 16 MB.
-            self.send("setoption name Hash value 256")
+            self.read_until("uciok", 5)
+            self.send("setoption name Threads value 1")
+            self.send("setoption name Hash value 64")
             self.send("isready")
-            self.read_until("readyok", timeout=10.0)
-        except Exception as e:
-            uci_print(f"info string [Warning] Failed to start Stockfish process at {self.path}: {e}")
-            
-            # Clean up any partially-started process
-            if self.proc:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-                for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
-                    if pipe:
-                        try:
-                            pipe.close()
-                        except Exception:
-                            pass
-            self.proc = None
+            self.read_until("readyok", 5)
+        except (OSError, TimeoutError):
+            self.close()
 
-    def send(self, cmd: str):
-        if self.proc and self.proc.stdin:
+    def _reader(self, proc):
+        try:
+            for line in proc.stdout:
+                self.lines.put(line.strip())
+        finally:
+            self.lines.put(None)
+
+    def send(self, command):
+        if self.proc is None or self.proc.poll() is not None:
+            raise OSError("Stockfish is not running")
+        self.proc.stdin.write(command + "\n")
+        self.proc.stdin.flush()
+
+    def read_until(self, expected, timeout=30.0):
+        end = time.monotonic() + timeout
+        stopping = False
+        result = []
+        while True:
+            now = time.monotonic()
+            cancelled = expected == "bestmove" and (self.cancel() or
+                (self.deadline is not None and now >= self.deadline))
+            if (cancelled or now >= end) and not stopping:
+                if expected != "bestmove":
+                    raise TimeoutError("Stockfish handshake timed out")
+                self.send("stop")
+                stopping = True
+                end = now + 0.25
+            if stopping and now >= end:
+                self.close()
+                raise TimeoutError("Stockfish did not stop")
             try:
-                self.proc.stdin.write(cmd + "\n")
-                self.proc.stdin.flush()
-            except Exception:
-                pass
+                line = self.lines.get(timeout=0.002)
+            except queue.Empty:
+                continue
+            if line is None:
+                raise OSError("Stockfish exited")
+            result.append(line)
+            if line.split()[:1] == [expected]:
+                self.last_complete = not stopping
+                return result
 
-    def read_until(self, expected: str, timeout: float = 30.0) -> List[str]:
-        """Reads lines from Stockfish stdout until the expected token is found.
-        
-        Uses a background thread to avoid deadlocking if Stockfish hangs.
-        Returns collected lines. If timeout expires, returns whatever was collected.
-        """
-        import threading
-        lines: List[str] = []
-        if not self.proc or not self.proc.stdout:
-            return lines
-
-        if self.reader_thread is not None and self.reader_thread.is_alive():
-            uci_print("info string [Warning] Stockfish reader thread still busy from previous timeout.")
-            return lines
-
-        done = threading.Event()
-
-        def _reader():
-            try:
-                while not done.is_set():
-                    line = self.proc.stdout.readline()
-                    if not line:
-                        break
-                    stripped = line.strip()
-                    lines.append(stripped)
-                    if stripped.startswith(expected):
-                        break
-            except Exception:
-                pass
-            finally:
-                done.set()
-
-        self.reader_thread = threading.Thread(target=_reader, daemon=True)
-        self.reader_thread.start()
-        self.reader_thread.join(timeout=timeout)
-
-        if not done.is_set():
-            # Timeout: Stockfish is stuck mid-search. Ask it to finish: the
-            # blocked reader drains until 'bestmove' and exits, keeping the
-            # pipe usable for future queries instead of leaking permanently.
-            done.set()
-            uci_print(f"info string [Warning] Stockfish read_until('{expected}') timed out after {timeout}s")
-            self.send("stop")
-            if self.reader_thread is not None:
-                self.reader_thread.join(timeout=5.0)
-
-        return lines
-
-    def evaluate_position(self, board: chess.Board, depth: int, multipv: int = 3) -> List[str]:
+    def evaluate_position(self, board, depth, multipv=3):
         self.send(f"setoption name MultiPV value {multipv}")
-        self.send(f"position fen {board.fen()}")
-        self.send(f"go depth {depth}")
+        # Preserve game history for repetition-aware evaluations.
+        moves = " ".join(m.uci() for m in board.move_stack)
+        self.send(f"position fen {board.root().fen()} moves {moves}")
+        self.send(f"go depth {max(1, depth)}")
         return self.read_until("bestmove")
 
     def close(self):
-        if self.proc:
-            try:
-                self.send("quit")
-                self.proc.wait(timeout=1)
-            except Exception:
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
+        try:
+            proc.stdin.write("quit\n")
+            proc.stdin.flush()
+            proc.wait(timeout=0.3)
+        except (OSError, subprocess.TimeoutExpired):
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=1)
+        if self.reader_thread:
+            self.reader_thread.join(timeout=1)
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe:
                 try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-            # Close pipes to avoid ResourceWarning about unclosed file handles
-            for pipe in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
-                if pipe:
-                    try:
-                        pipe.close()
-                    except Exception:
-                        pass
-            self.proc = None
+                    pipe.close()
+                except OSError:
+                    pass  # An already-dead child can reject the final stdin flush.
 
 
 class StockfishEvaluator(EvaluatorBase):
-    """
-    Evaluates positions using a local Stockfish binary via synchronous subprocess UCI commands.
-    Used for Stockfish-guided MCTS (Hybrid mode), avoiding any training or heavy overhead.
-    """
-    def __init__(self, stockfish_path: str = "stockfish", depth: int = 5, multipv: int = 3):
-        self.stockfish_path = stockfish_path
-        self.depth = depth
-        self.multipv = max(1, multipv)
-        self.engine = None
-        
-        # Try to launch engine
-        self.engine = SubprocessStockfish(self.stockfish_path)
+    def __init__(self, stockfish_path="stockfish", depth=5, multipv=3):
+        self.stockfish_path, self.depth, self.multipv = stockfish_path, depth, multipv
+        self.engine = SubprocessStockfish(stockfish_path)
+        self.deadline = None
+        self.cancel = lambda: False
+        self.cacheable = True
         if self.engine.proc is None:
-            uci_print("info string [Warning] Could not load Stockfish engine. Falling back to a material heuristic evaluator.")
-            
-            self.engine = None
+            uci_print("info string Stockfish unavailable; using static evaluation")
 
-    def _restart_engine(self):
-        """Restarts the Stockfish process to recover from any communication or sync errors."""
-        if self.engine is not None:
-            self.engine.close()
-        self.engine = SubprocessStockfish(self.stockfish_path)
-        if self.engine.proc is None:
-            self.engine = None
+    def _heuristic_evaluate(self, board):
+        from alpha_beta import evaluate_board
+        policy = get_legal_move_mask(board).astype(np.float32)
+        if policy.sum():
+            policy /= policy.sum()
+        return policy, math.tanh(evaluate_board(board) / 600.0)
 
-    def evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
-        # If Stockfish engine is not loaded, fallback to material heuristics
+    def evaluate(self, board):
+        self.cacheable = False
+        if self.cancel() or (self.deadline is not None and time.monotonic() >= self.deadline):
+            return self._heuristic_evaluate(board)
         if self.engine is None or self.engine.proc is None:
             return self._heuristic_evaluate(board)
-
+        self.engine.cancel, self.engine.deadline = self.cancel, self.deadline
         try:
-            # Query Stockfish synchronously
-            lines = self.engine.evaluate_position(board, self.depth, multipv=self.multipv)
-
-            # Parse lines
-            move_scores_dict = {}
-            best_eval = 0
-            best_eval_set = False
-            best_is_mate = False
-            best_mate_dist = 0
-
-            for line in lines:
-                if line.startswith("info"):
-                    tokens = line.split()
-
-                    # Extract multipv
-                    multipv = 1
-                    if "multipv" in tokens:
-                        multipv_idx = tokens.index("multipv") + 1
-                        if multipv_idx < len(tokens):
-                            multipv = int(tokens[multipv_idx])
-
-                    # Extract score
-                    score_val = 0
-                    score_type = "cp"
-                    score_value_str = "0"
-                    if "score" in tokens:
-                        score_idx = tokens.index("score") + 1
-                        if score_idx + 1 < len(tokens):
-                            score_type = tokens[score_idx] # "cp" or "mate"
-                            score_value_str = tokens[score_idx + 1]
-                            try:
-                                score_value = int(score_value_str)
-                                if score_type == "mate":
-                                    score_val = 10000 if score_value > 0 else -10000
-                                else:
-                                    score_val = score_value
-                            except Exception:
-                                pass
-
-                    # Extract PV move
-                    if "pv" in tokens:
-                        pv_idx = tokens.index("pv") + 1
-                        if pv_idx < len(tokens):
-                            pv_move_str = tokens[pv_idx]
-                            try:
-                                pv_move = chess.Move.from_uci(pv_move_str)
-                                # Only add if it's a legal move for the current board
-                                if pv_move in board.legal_moves:
-                                    move_scores_dict[pv_move] = score_val
-                            except Exception:
-                                pass
-
-                    # Save the score of multipv 1 as main eval
-                    if multipv == 1:
-                        best_eval = score_val
-                        best_eval_set = True
-                        best_is_mate = (score_type == "mate")
-                        try:
-                            best_mate_dist = abs(int(score_value_str)) if best_is_mate else 0
-                        except Exception:
-                            best_mate_dist = 0
-
-            if not best_eval_set:
-                return self._heuristic_evaluate(board)
-
-            move_scores = list(move_scores_dict.items())
-
-            # Map score to value in [-1, 1]. Mate scores keep their distance:
-            # a forced mate-in-2 must outrank a mate-in-8 (tanh would flatten
-            # both to ±1.0 and lose that ordering).
-            if best_is_mate:
-                proximity = 1.0 - (min(best_mate_dist, 60) / 60.0) * 0.08  # 1.0 .. 0.92
-                value = proximity if best_eval > 0 else -proximity
-            else:
-                value = math.tanh(best_eval / 200.0)
-
-            # Get policy priors from moves evaluated
-            policy_probs = np.zeros(4096, dtype=np.float32)
-
-            # If no scores are returned, fallback to uniform
-            if not move_scores:
-                legal_moves = list(board.legal_moves)
-                for move in legal_moves:
-                    policy_probs[encode_move(move)] = 1.0 / len(legal_moves)
-            else:
-                # Softmax scores with numerical stability
-                moves = list(move_scores_dict.keys())
-                scores = list(move_scores_dict.values())
-
-                # Convert scores (centipawns) to probabilities
-                # Use a softmax with a temperature scale
-                scaled_scores = np.array(scores, dtype=np.float32) / 100.0
-
-                # Prevent np.exp overflow by subtracting the max score
-                max_score = np.max(scaled_scores)
-                exp_scores = np.exp(scaled_scores - max_score)
-                scores_prob = exp_scores / np.sum(exp_scores)
-
-                # Distribute most probability among evaluated PV moves
-                for move, prob in zip(moves, scores_prob):
-                    policy_probs[encode_move(move)] = prob * 0.90
-
-                # Remaining 10% distributed uniformly across all legal moves for exploration
-                legal_moves = list(board.legal_moves)
-                for move in legal_moves:
-                    policy_probs[encode_move(move)] += 0.10 / len(legal_moves)
-
-            # Ensure it sums to 1.0
-            policy_probs = policy_probs / np.sum(policy_probs)
-            return policy_probs, value
-
-        except Exception as e:
-            uci_print(f"info string [Warning] Stockfish evaluation error: {e}. Restarting Stockfish process...")
-            
-            self._restart_engine()
+            lines = self.engine.evaluate_position(board, self.depth, self.multipv)
+        except (OSError, TimeoutError):
+            self.engine.close()
+            uci_print("info string Stockfish query failed; using static evaluation")
             return self._heuristic_evaluate(board)
-
-    def _heuristic_evaluate(self, board: chess.Board) -> Tuple[np.ndarray, float]:
-        """Lightweight fallback evaluator based on piece values."""
-        # Simple material values
-        values = {
-            chess.PAWN: 1,
-            chess.KNIGHT: 3,
-            chess.BISHOP: 3,
-            chess.ROOK: 5,
-            chess.QUEEN: 9,
-            chess.KING: 0
-        }
-        
-        # Calculate material score from active player perspective
-        active_color = board.turn
-        opponent_color = not active_color
-        
-        active_score = sum(len(board.pieces(p, active_color)) * val for p, val in values.items())
-        opponent_score = sum(len(board.pieces(p, opponent_color)) * val for p, val in values.items())
-        
-        score_diff = active_score - opponent_score
-        value = math.tanh(score_diff / 5.0) # value in [-1, 1]
-
-        # Uniform policy over all legal moves
-        legal_moves = list(board.legal_moves)
-        policy_probs = np.zeros(4096, dtype=np.float32)
-        if legal_moves:
-            for move in legal_moves:
-                policy_probs[encode_move(move)] = 1.0 / len(legal_moves)
-        return policy_probs, value
+        # Retain only deepest completed information for each MultiPV rank.
+        slots = {}
+        for line in lines:
+            tokens = line.split()
+            if not tokens or tokens[0] != "info" or "score" not in tokens or "pv" not in tokens:
+                continue
+            if "lowerbound" in tokens or "upperbound" in tokens:
+                continue
+            try:
+                rank = int(tokens[tokens.index("multipv") + 1]) if "multipv" in tokens else 1
+                depth = int(tokens[tokens.index("depth") + 1])
+                idx = tokens.index("score")
+                kind, score = tokens[idx + 1], int(tokens[idx + 2])
+                move = chess.Move.from_uci(tokens[tokens.index("pv") + 1])
+                if move not in board.legal_moves:
+                    continue
+                if kind == "mate":
+                    cp = (10000 - min(1000, abs(score))) * (1 if score > 0 else -1)
+                    value = (1 - min(100, abs(score)) * 0.0005) * (1 if score > 0 else -1)
+                else:
+                    cp, value = score, 0.95 * math.tanh(score / 600.0)
+                if rank not in slots or depth >= slots[rank][0]:
+                    slots[rank] = (depth, move, cp, value)
+            except (ValueError, IndexError):
+                continue
+        if 1 not in slots:
+            return self._heuristic_evaluate(board)
+        primary = slots[1]
+        current = [s for s in slots.values() if s[0] == primary[0]]
+        scores = np.array([s[2] for s in current], dtype=np.float64) / 80.0
+        weights = np.exp(scores - scores.max())
+        weights /= weights.sum()
+        policy = get_legal_move_mask(board).astype(np.float32)
+        policy *= 0.02 / max(1, policy.sum())
+        for entry, weight in zip(current, weights):
+            policy[encode_move(entry[1])] += 0.98 * weight
+        self.cacheable = self.engine.last_complete
+        return policy, primary[3]
 
     def close(self):
-        if self.engine is not None:
+        if self.engine:
             self.engine.close()
 
 
 class MCTS:
-    """
-    Performs Monte Carlo Tree Search.
-    Supports Dirichlet noise, an LRU-bounded transposition table,
-    wall-clock deadlines and hybrid Alpha-Beta prior boosting for tactical awareness.
-    """
-    def __init__(self, evaluator: EvaluatorBase, c_puct: float = 1.5, num_simulations: int = 800):
-        self.evaluator = evaluator
-        self.c_puct = c_puct
-        self.num_simulations = num_simulations
-        self.transposition_table: 'OrderedDict[str, Tuple[np.ndarray, float]]' = OrderedDict()
+    def __init__(self, evaluator, c_puct=1.5, num_simulations=800):
+        self.evaluator, self.c_puct, self.num_simulations = evaluator, c_puct, num_simulations
+        self.transposition_table = OrderedDict()
         self.abort_search = False
+        self.cancel = lambda: False
+        self.last_root = None
+        self.deadline = None
+        self.max_depth = None
+        self.depth_reached = 0
+        self.progress = None
+        self.tree_nodes = 0
 
     def clear_cache(self):
-        """Drops all cached evaluations (call when the evaluator changes or a new game starts)."""
         self.transposition_table.clear()
 
-    def _get_evaluation(self, board: chess.Board) -> Tuple[np.ndarray, float]:
-        """Queries the evaluator, utilizing the LRU transposition table for caching."""
-        # Key on EPD (position only, no halfmove/fullmove counters): policy and
-        # value never depend on the clocks, so this strictly increases hits.
-        key = board.epd()
+    def _get_evaluation(self, board):
+        # Halfmove clock and reversible history affect NN input and draw scores.
+        history = tuple(m.uci() for m in board.move_stack[-board.halfmove_clock:]) if board.halfmove_clock else ()
+        key = (' '.join(board.fen().split()[:5]), history, getattr(self.evaluator, "depth", None),
+               getattr(self.evaluator, "multipv", None))
         cached = self.transposition_table.get(key)
         if cached is not None:
             self.transposition_table.move_to_end(key)
-            return cached
-
+            indices, weights, value = cached
+            policy = np.zeros(POLICY_SIZE, dtype=np.float32)
+            policy[indices] = weights
+            return policy, value
         policy, value = self.evaluator.evaluate(board)
-
-        self.transposition_table[key] = (policy, value)
-        while len(self.transposition_table) > MAX_TT_ENTRIES:
-            self.transposition_table.popitem(last=False)
+        policy = np.asarray(policy, dtype=np.float32).copy()
+        mask = get_legal_move_mask(board)
+        policy = np.where(mask & np.isfinite(policy), np.maximum(policy, 0), 0)
+        if policy.sum() == 0:
+            policy = mask.astype(np.float32)
+        if policy.sum():
+            policy /= policy.sum()
+        value = float(np.clip(value, -1, 1)) if np.isfinite(value) else 0.0
+        if getattr(self.evaluator, "cacheable", True):
+            indices = np.flatnonzero(policy).astype(np.uint16)
+            self.transposition_table[key] = (indices, policy[indices].copy(), value)
+            if len(self.transposition_table) > MAX_TT_ENTRIES:
+                self.transposition_table.popitem(last=False)
         return policy, value
 
-    def search(self, board: chess.Board, add_noise: bool = False,
-               noise_epsilon: float = 0.25, noise_alpha: float = 0.3,
-               ab_candidates: 'Optional[List[tuple]]' = None,
-               deadline: Optional[float] = None) -> MCTSNode:
-        """
-        Runs MCTS search from the root node.
-        Returns the root node containing search statistics.
-        
-        Args:
-            board: Current board position.
-            add_noise: Whether to add Dirichlet exploration noise at root.
-            noise_epsilon: Weight of Dirichlet noise vs policy (0.0-1.0).
-            noise_alpha: Dirichlet distribution alpha parameter.
-            ab_candidates: Optional list of (chess.Move, score_cp) tuples from
-                          Alpha-Beta filter to boost in the MCTS prior.
-            deadline: Optional absolute time.time() value; no new simulation is
-                      started once it is exceeded (time-control safety).
-        """
-        import sys
-        
-        root = MCTSNode(prior=1.0)
-        
-        # 1. Expand root node
-        policy, value = self._get_evaluation(board)
-        legal_mask = get_legal_move_mask(board)
-        
-        # 1b. Boost priors for Alpha-Beta candidate moves
-        if ab_candidates and len(ab_candidates) > 0:
-            # Give AB candidates a significant prior boost proportional to their rank
-            ab_boost_total = 0.40  # Allocate 40% of total prior mass to AB candidates
-            remaining_mass = 1.0 - ab_boost_total
-            
-            # Scale existing policy down
-            policy = policy * remaining_mass
-            
-            # Distribute boost among AB candidates (weighted by rank)
-            n_cands = len(ab_candidates)
-            for rank, (move, score_cp) in enumerate(ab_candidates):
-                action = encode_move(move)
-                if legal_mask[action]:
-                    # Higher-ranked moves get more boost (linear decay)
-                    weight = (n_cands - rank) / sum(range(1, n_cands + 1))
-                    policy[action] += ab_boost_total * weight
-            
-            # Re-normalize
-            policy = policy * legal_mask
-            total = np.sum(policy)
-            if total > 0:
-                policy = policy / total
-        
-        # 1c. Apply Dirichlet noise at the root for exploration
-        legal_moves = list(board.legal_moves)
-        if add_noise and len(legal_moves) > 0:
-            noise = np.random.dirichlet([noise_alpha] * len(legal_moves))
-            
-            # Mix noise into policy
-            noise_idx = 0
-            for action in range(4096):
-                if legal_mask[action]:
-                    policy[action] = (1 - noise_epsilon) * policy[action] + noise_epsilon * noise[noise_idx]
-                    noise_idx += 1
-            # Re-normalize
-            policy = policy * legal_mask
-            policy = policy / np.sum(policy)
+    def _stopped(self):
+        return self.abort_search or self.cancel() or (self.deadline is not None and time.monotonic() >= self.deadline)
 
-        root.expand(policy, legal_mask, board)
+    def search(self, board, **kwargs):
+        settings = {name: getattr(self.evaluator, name) for name in
+                    ('depth', 'multipv', 'deadline', 'cancel') if hasattr(self.evaluator, name)}
+        try:
+            return self._search(board, **kwargs)
+        finally:
+            for name, value in settings.items():
+                setattr(self.evaluator, name, value)
 
-        # 1d. Root repetition guard: a move that instantly recreates a
-        # threefold repetition (against real game history) is scored as a
-        # draw inside the tree, but with shallow searches the engine may
-        # still drift into it while winning. Crush such priors so the
-        # choice is only made when nothing better exists.
-        if len(legal_moves) > 0:
-            rep_board = board.copy()
-            for child in root.children.values():
-                if child.move is None:
-                    continue
-                rep_board.push(child.move)
-                if rep_board.is_repetition(3):
-                    child.prior *= 1e-3
-                rep_board.pop()
-
-        # 2. Run simulations
-        start_time = time.time()
-        for i in range(self.num_simulations):
-            if self.abort_search:
-                break
-            if deadline is not None and time.time() >= deadline:
+    def _search(self, board, add_noise=False, noise_epsilon=0.25, noise_alpha=0.3,
+               ab_candidates=None, deadline=None, root_moves=None, max_depth=None):
+        # Legacy callers supply epoch deadlines; internal clocks are monotonic.
+        self.deadline = (time.monotonic() + deadline - time.time()
+                         if deadline is not None and deadline > 1000000000 else deadline)
+        self.max_depth = max_depth
+        self.depth_reached = 0
+        root = self.last_root = MCTSNode(1)
+        mask = get_legal_move_mask(board)
+        if root_moves is not None:
+            allowed = np.zeros(POLICY_SIZE, dtype=bool)
+            for move in root_moves:
+                allowed[encode_move(move)] = True
+            mask &= allowed
+        if not mask.any():
+            return root
+        if isinstance(self.evaluator, StockfishEvaluator):
+            self.evaluator.cancel = lambda: self.abort_search or self.cancel()
+            self.evaluator.deadline = self.deadline
+            original_depth, original_multipv = self.evaluator.depth, self.evaluator.multipv
+            if self.deadline is not None:
+                self.evaluator.deadline = time.monotonic() + max(0, self.deadline - time.monotonic()) * 0.6
+        if self._stopped():
+            policy = mask.astype(np.float32) / mask.sum()
+            root.evaluation_value = 0.0
+        else:
+            policy, root.evaluation_value = self._get_evaluation(board)
+        if isinstance(self.evaluator, StockfishEvaluator):
+            self.evaluator.deadline = self.deadline
+            self.evaluator.depth = min(original_depth, 6)
+            self.evaluator.multipv = 1
+        policy = policy.copy() * mask
+        if ab_candidates:
+            for rank, (move, _) in enumerate(ab_candidates):
+                if mask[encode_move(move)]:
+                    policy[encode_move(move)] += 0.4 / (rank + 1)
+        if policy.sum() == 0:
+            policy = mask.astype(np.float32)
+        policy /= policy.sum()
+        indices = np.flatnonzero(mask)
+        if add_noise:
+            policy[indices] = ((1 - noise_epsilon) * policy[indices]
+                               + noise_epsilon * np.random.dirichlet([noise_alpha] * len(indices)))
+        root.expand(policy, mask, board)
+        self.tree_nodes = 1 + len(root.children)
+        # A verified immediate mate dominates search, including underpromotions.
+        for child in root.children.values():
+            board.push(child.move)
+            mate = board.is_checkmate()
+            board.pop()
+            if mate:
+                root.proven_move = child.move
+                child.update(1.0)
+                root.update(-1.0)
+                return root
+        next_info = time.monotonic() + 0.25
+        for _ in range(self.num_simulations):
+            if self._stopped():
                 break
             self._simulate(root, board.copy())
-            
-            # Print search info periodically (every 50 simulations or on completion)
-            if (i + 1) % 50 == 0 or (i + 1) == self.num_simulations:
-                # Don't print info if search was aborted — stale PV lines
-                # confuse GUIs into briefly showing the wrong board state.
-                if self.abort_search:
-                    break
-                elapsed = max(1e-3, time.time() - start_time)
-                nps = int((i + 1) / elapsed)
-                time_ms = int(elapsed * 1000)
-                
-                # Find best move from root to get score and pv
-                best_child = None
-                max_visits = -1
-                for child in root.children.values():
-                    if child.visit_count > max_visits:
-                        max_visits = child.visit_count
-                        best_child = child
-                
-                if best_child:
-                    val = best_child.mean_value
-                    # Convert Q to centipawns (tanh scale back to cp)
-                    # Safe atanh logic
-                    safe_val = max(-0.999, min(0.999, val))
-                    score_cp = int(math.log((1.0 + safe_val) / (1.0 - safe_val)) * 0.5 * 150.0)
-                    
-                    # Extract PV line of play
-                    pv = []
-                    curr = root
-                    visited = set()
-                    while curr and curr.children:
-                        bc = max(curr.children.values(), key=lambda c: c.visit_count, default=None)
-                        if bc and bc.visit_count > 0:
-                            m_uci = bc.move.uci()
-                            if m_uci in visited:
-                                break
-                            visited.add(m_uci)
-                            pv.append(m_uci)
-                            curr = bc
-                        else:
-                            break
-                    
-                    pv_str = " ".join(pv)
-                    depth = len(pv)
-                    
-                    # Output standard UCI info string
-                    uci_print(f"info depth {depth} score cp {score_cp} nodes {i+1} nps {nps} time {time_ms} pv {pv_str}")
-                    
-        
+            if self.progress and time.monotonic() >= next_info:
+                self.progress(root)
+                next_info = time.monotonic() + 0.25
         return root
 
-    def _simulate(self, root: MCTSNode, board: chess.Board):
-        """Performs a single simulation: selection, expansion, evaluation, and backpropagation."""
-        node = root
-        search_path = [node]
-
-        # Selection
-        while len(node.children) > 0:
-            action, next_node = node.select_child(self.c_puct)
-            if next_node is None:
-                break
-            node = next_node
+    def _simulate(self, root, board):
+        node, path = root, [root]
+        while node.children and (self.max_depth is None or len(path) <= self.max_depth):
+            if self._stopped():
+                return
+            _, node = node.select_child(self.c_puct)
             board.push(node.move)
-            search_path.append(node)
-
-        # Check for game end
-        if board.is_game_over(claim_draw=True):
-            outcome = board.outcome(claim_draw=True)
-            # Outcome value from active player's perspective
-            if outcome.winner is None:
-                value = 0.0  # Draw
-            elif outcome.winner == board.turn:
-                value = 1.0  # Current player wins
-            else:
-                value = -1.0  # Current player loses
+            path.append(node)
+        outcome = board.outcome(claim_draw=False)
+        self.depth_reached = max(self.depth_reached, len(path) - 1)
+        if outcome is not None:
+            value = 0.0 if outcome.winner is None else (1.0 if outcome.winner == board.turn else -1.0)
         else:
-            # Expansion & Evaluation
-            policy, value = self._get_evaluation(board)
-            legal_mask = get_legal_move_mask(board)
-            node.expand(policy, legal_mask, board)
-
-        # Backpropagation
-        # The value returned is for the player whose turn it is on the leaf board.
-        # We must invert the value at each step up because the players alternate turns.
-        # Start by inverting the value so that each node stores value from the parent's perspective.
+            if self.max_depth is not None and len(path) - 1 >= self.max_depth:
+                from alpha_beta import evaluate_board
+                policy = get_legal_move_mask(board).astype(np.float32)
+                value = math.tanh(evaluate_board(board) / 600.0)
+            else:
+                if isinstance(self.evaluator, StockfishEvaluator) and self.max_depth is not None:
+                    self.evaluator.depth = max(1, min(6, self.max_depth - len(path) + 1))
+                policy, value = self._get_evaluation(board)
+            if self._stopped():
+                return
+            # Claiming is an option, not a forced end to a winning line.
+            if board.can_claim_fifty_moves() or (board.halfmove_clock >= 7 and board.can_claim_threefold_repetition()):
+                value = max(0.0, value)
+            if self.max_depth is None or len(path) - 1 < self.max_depth:
+                mask = get_legal_move_mask(board)
+                if self.tree_nodes + int(mask.sum()) <= MAX_TREE_NODES:
+                    node.expand(policy, mask, board)
+                    self.tree_nodes += len(node.children)
         value = -value
-        for n in reversed(search_path):
-            n.update(value)
-            value = -value  # Invert for opponent's turn
+        for node in reversed(path):
+            node.update(value)
+            value = -value
 
-    def get_visit_counts(self, board: chess.Board, add_noise: bool = False,
-                         noise_epsilon: float = 0.25, noise_alpha: float = 0.3,
-                         ab_candidates: 'Optional[List[tuple]]' = None,
-                         deadline: Optional[float] = None) -> np.ndarray:
-        """
-        Runs MCTS search and returns the raw visit count array of shape (4096,).
-        Move selection (temperature, top-K) is handled externally by DifficultyController.
-        
-        Args:
-            board: Current board position.
-            add_noise: Whether to add Dirichlet exploration noise.
-            noise_epsilon: Noise weight.
-            noise_alpha: Dirichlet alpha.
-            ab_candidates: Alpha-Beta candidate moves to boost.
-            deadline: Optional absolute time.time() after which no new simulations start.
-        
-        Returns:
-            np.ndarray of shape (4096,) with visit counts per action.
-        """
-        root = self.search(board, add_noise=add_noise,
-                          noise_epsilon=noise_epsilon, noise_alpha=noise_alpha,
-                          ab_candidates=ab_candidates, deadline=deadline)
-        
-        visits = np.zeros(4096, dtype=np.float32)
+    def get_visit_counts(self, board, **kwargs):
+        root = self.search(board, **kwargs)
+        visits = np.zeros(POLICY_SIZE, dtype=np.float32)
         for action, child in root.children.items():
             visits[action] = child.visit_count
-        
+        if not visits.any():
+            for action, child in root.children.items():
+                visits[action] = child.prior
         return visits
 
-    def get_move_probs(self, board: chess.Board, temp: float = 1.0) -> np.ndarray:
-        """
-        Runs search and returns policy probabilities vector of shape (4096,).
-        If temp = 1.0, probabilities are proportional to visit counts.
-        If temp = 0.0, it is a one-hot vector corresponding to the max-visited move.
-        
-        Note: For the hybrid engine with difficulty control, prefer using
-        get_visit_counts() + select_move_with_variety() from difficulty.py instead.
-        This method is retained for backward compatibility with evaluator.py and self_play.py.
-        """
-        root = self.search(board, add_noise=(temp > 0.5))
-        
-        visits = np.zeros(4096, dtype=np.float32)
-        for action, child in root.children.items():
-            visits[action] = child.visit_count
-
-        total_visits = np.sum(visits)
-
-        if temp == 0.0:
-            # Deterministic selection (max visits)
-            if total_visits == 0:
-                # Fallback if no simulations ran or all visits are 0
-                legal_mask = get_legal_move_mask(board)
-                if root.children:
-                    # Select the move with the highest prior probability
-                    best_action = max(root.children.keys(), key=lambda act: root.children[act].prior)
-                else:
-                    best_action = int(np.argmax(legal_mask)) if np.any(legal_mask) else 0
-            else:
-                best_action = np.argmax(visits)
-                
-            probs = np.zeros(4096, dtype=np.float32)
-            probs[best_action] = 1.0
+    def get_move_probs(self, board, temp=1.0):
+        if temp < 0 or not math.isfinite(temp):
+            raise ValueError("Temperature must be finite and nonnegative")
+        visits = self.get_visit_counts(board, add_noise=temp > 0.5)
+        probs = np.zeros(POLICY_SIZE, dtype=np.float32)
+        indices = np.flatnonzero(visits)
+        if not len(indices):
             return probs
+        if temp == 0:
+            probs[int(np.argmax(visits))] = 1
         else:
-            # Stochastic selection (visit counts raised to 1/temp power)
-            if total_visits == 0:
-                # Fallback if no simulations ran
-                legal_mask = get_legal_move_mask(board)
-                return legal_mask / np.sum(legal_mask) if np.any(legal_mask) else np.ones(4096) / 4096
-                
-            visits = visits ** (1.0 / temp)
-            total = np.sum(visits)
-            return visits / total
+            logits = np.log(visits[indices].astype(np.float64)) / temp
+            weights = np.exp(logits - logits.max())
+            probs[indices] = weights / weights.sum()
+        return probs

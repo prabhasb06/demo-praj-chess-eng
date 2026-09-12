@@ -1,557 +1,326 @@
-"""
-MODULE 6b: uci_engine.py
-Python-based UCI Wrapper for the Praj MCTS Hybrid Chess Engine.
-Integrates Alpha-Beta tactical filtering, MCTS strategic search, and
-configurable difficulty settings for En Croissant and other UCI GUIs.
-"""
-
-import sys
+"""UCI frontend. A single worker owns evaluators; each search owns its cancellation state."""
 import os
-import queue
+import math
+import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+
 import chess
 import numpy as np
-from concurrent.futures import ThreadPoolExecutor
-from mcts import MCTS, StockfishEvaluator, uci_print
-from board_encoder import decode_move
-from alpha_beta import AlphaBetaFilter
-from difficulty import DifficultyController, select_move_with_variety
 
-# Uses uci_print from mcts.py
+from board_encoder import decode_move
+from difficulty import DifficultyController, select_move_with_variety
+from mcts import MCTS, StockfishEvaluator, uci_print
 
 
 def _num(token):
-    """Tolerant numeric parser for 'go' arguments.
-
-    UCI says milliseconds are integers, but some GUIs/tournament tools emit
-    floats ('29989.24'). int('29989.24') raises and used to nuke the whole
-    search into the instant-fallback path. Accept both.
-    """
     try:
         return int(token)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         try:
             return int(float(token))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
 
 
-def parse_time_from_go(tokens, board, max_think_time):
-    """Parse time control from 'go' command tokens."""
-    wtime = btime = winc = binc = movestogo = movetime = depth = None
-    infinite = False
-
-    for i, tok in enumerate(tokens):
-        if tok == "wtime" and i + 1 < len(tokens): wtime = _num(tokens[i + 1])
-        elif tok == "btime" and i + 1 < len(tokens): btime = _num(tokens[i + 1])
-        elif tok == "winc" and i + 1 < len(tokens): winc = _num(tokens[i + 1])
-        elif tok == "binc" and i + 1 < len(tokens): binc = _num(tokens[i + 1])
-        elif tok == "movestogo" and i + 1 < len(tokens): movestogo = _num(tokens[i + 1])
-        elif tok == "movetime" and i + 1 < len(tokens): movetime = _num(tokens[i + 1])
-        elif tok == "depth" and i + 1 < len(tokens): depth = _num(tokens[i + 1])
-        elif tok == "nodes" and i + 1 < len(tokens): pass # Currently ignored, mapped to depth if needed
-        elif tok == "infinite": infinite = True
-
-    if infinite:
-        return 31536000.0, True # 1 year, infinite flag
-    
-    if movetime is not None:
-        return movetime / 1000.0, False
-        
-    if depth is not None:
-        return min(max(0.8, depth * 0.25), max_think_time), False
-
-    if board.turn == chess.WHITE and wtime is not None:
-        remaining_ms = wtime
-        inc_ms = winc or 0
-    elif board.turn == chess.BLACK and btime is not None:
-        remaining_ms = btime
-        inc_ms = binc or 0
-    else:
-        return None, False
-    
-    if movestogo is not None and movestogo > 0:
-        allocated_ms = remaining_ms / (movestogo + 1) + inc_ms * 0.8
-    else:
-        allocated_ms = remaining_ms / 30.0 + inc_ms * 0.8
-    
-    allocated_ms = min(allocated_ms, remaining_ms / 5.0)
-    allocated_ms = max(allocated_ms, 100)
-    
-    return allocated_ms / 1000.0, False
+GO_VALUES = {"wtime", "btime", "winc", "binc", "movestogo", "movetime", "depth", "nodes", "mate"}
+GO_WORDS = GO_VALUES | {"go", "infinite", "ponder", "searchmoves"}
 
 
-def stdin_reader(input_queue):
-    """Isolated thread for reading stdin to avoid blocking."""
-    while True:
-        try:
-            line = sys.stdin.readline()
-            if not line:
-                input_queue.put(("exit", ""))
-                break
-            line = line.strip()
-            if not line:
-                continue
-            input_queue.put(("cmd", line))
-        except EOFError:
-            input_queue.put(("exit", ""))
-            break
-        except Exception as e:
-            uci_print(f"info string Error reading stdin: {e}")
-            input_queue.put(("exit", ""))
-            break
-
-
-def _pick_promotion(board: chess.Board, from_square: int, to_square: int):
-    """Returns the best legal promotion move matching a from/to pair, if any.
-
-    The 4096 action space collapses q/r/b/n promotions into one index and
-    decode_move defaults to queen. If the queen promotion is illegal (or the
-    search selected an action whose only legal realizations are other
-    promotions), pick the highest-value legal promotion instead.
-    Preference order: queen, knight, rook, bishop.
-    """
-    preference = [chess.QUEEN, chess.KNIGHT, chess.ROOK, chess.BISHOP]
-    candidates = [m for m in board.legal_moves
-                  if m.from_square == from_square and m.to_square == to_square]
-    for promo in preference:
-        for m in candidates:
-            if m.promotion == promo:
-                return m
-    return None
-
-
-def execute_go(mcts, ab_filter, evaluator, difficulty, tokens, board, move_variety,
-               search_id, state, abort_event):
-    """Executes the deep search asynchronously to unblock the main UCI event loop.
-    
-    Args:
-        abort_event: threading.Event — set by the main thread to signal abort.
-                     Cleared only by this function when it starts a fresh search.
-    """
-    # If this search was already superseded before it even started, bail out
-    # silently — a newer 'go' owns the bestmove obligation.
-    if _superseded(search_id, state):
-        return
-    # Only clear the abort flag if no 'stop' is pending.
-    if not state.get("stop_requested", False):
-        # Brief settling period: let the GUI finish processing the previous
-        # bestmove before we start emitting info lines for the new search.
-        time.sleep(0.02)
-        if _superseded(search_id, state):
-            return
-        abort_event.clear()
-        mcts.abort_search = False
-    mcts.is_searching = True
-    try:
-        if board.is_game_over(claim_draw=True) or not board.legal_moves:
-            if not _superseded(search_id, state):
-                uci_print("bestmove 0000")
-            return
-
-        params = difficulty.get_params()
-        
-        allocated_time, is_infinite = parse_time_from_go(tokens, board, params.max_think_time)
-        if allocated_time is not None:
-            max_time = allocated_time if is_infinite else min(allocated_time, params.max_think_time)
-        else:
-            max_time = params.max_think_time
-        
-        search_start = time.time()
-        
-        # =============================================
-        # PHASE 1: Tactical Analysis / Prior Seeding
-        # =============================================
-        # For maximum strength (Level >= 8 or Stockfish evaluator), Stockfish-guided MCTS
-        # provides deep, accurate tactical and strategic evaluation. Dedicate 100% time to MCTS.
-        use_ab = params.level < 8 and not isinstance(evaluator, StockfishEvaluator)
-        ab_candidates = None
-        ab_elapsed = 0.0
-
-        if use_ab:
-            ab_result = ab_filter.analyze(board)
-            ab_elapsed = time.time() - search_start
-            
-            # Check if aborted during AB phase
-            if _superseded(search_id, state):
-                return
-            if abort_event.is_set() and not state.get("stop_requested", False):
-                return
-            
-            if ab_result.best_move:
-                uci_print(f"info string AB filter: score={ab_result.score_cp}cp "
-                           f"tactical={ab_result.is_tactical} "
-                           f"candidates={len(ab_result.candidate_moves)} "
-                           f"time={int(ab_elapsed*1000)}ms")
-            
-            # Only play immediately on verified checkmate
-            if ab_result.score_cp >= 90000 and ab_result.best_move in board.legal_moves:
-                board_test = board.copy()
-                board_test.push(ab_result.best_move)
-                if board_test.is_checkmate():
-                    if not _superseded(search_id, state):
-                        uci_print(f"bestmove {ab_result.best_move.uci()}")
-                    return
-            
-            ab_candidates = ab_result.candidate_moves if ab_result.candidate_moves else None
-
-        # =============================================
-        # PHASE 2: MCTS Strategic Search
-        # =============================================
-        mcts.num_simulations = 1_000_000_000 if is_infinite else params.num_simulations
-        mcts.c_puct = params.c_puct
-        evaluator.depth = params.stockfish_depth
-        if hasattr(evaluator, "multipv"):
-            evaluator.multipv = params.stockfish_multipv
-        
-        remaining_time = max_time - ab_elapsed
-        if remaining_time < 0.05:
-            remaining_time = 0.05
-        # Reserve a small safety margin for move selection + output.
-        deadline = time.time() + remaining_time * 0.95
-        
-        visit_counts = mcts.get_visit_counts(
-            board,
-            add_noise=params.add_noise if move_variety else False,
-            noise_epsilon=params.noise_epsilon,
-            noise_alpha=params.noise_alpha,
-            ab_candidates=ab_candidates,
-            deadline=deadline
-        )
-
-        # Check again after MCTS returns
-        if _superseded(search_id, state):
-            return
-        if abort_event.is_set() and not state.get("stop_requested", False):
-            return
-        
-        # =============================================
-        # PHASE 3: Move Selection with Difficulty Control
-        # =============================================
-        if move_variety:
-            action = select_move_with_variety(visit_counts, params, board)
-        else:
-            action = int(np.argmax(visit_counts))
-        
-        best_move = decode_move(action, board)
-        
-        if best_move not in board.legal_moves:
-            # The 4096 action space collapses under-promotions into the queen
-            # promotion index; try other promotion variants of the same move first.
-            promo_alt = _pick_promotion(board, action // 64, action % 64)
-            if promo_alt is not None:
-                best_move = promo_alt
-            else:
-                uci_print(f"info string Warning: selected illegal move "
-                           f"{best_move.uci()}, falling back")
-                legal = list(board.legal_moves)
-                best_move = legal[0] if legal else chess.Move.null()
-        
-        total_time = time.time() - search_start
-        if not _superseded(search_id, state):
-            uci_print(f"info string Total search: {int(total_time*1000)}ms "
-                       f"(AB={int(ab_elapsed*1000)}ms, "
-                       f"MCTS={int((total_time-ab_elapsed)*1000)}ms)")
-            if state.get("ponder", False) and not state.get("stop_requested", False):
-                # Ponder search: hold the move until 'ponderhit'. All
-                # evaluations stay cached (EPD-keyed TT + Stockfish hash),
-                # so an un-pondered result is still fully reused later.
-                state["ponder_best"] = best_move.uci()
-                state["ponder_best_id"] = search_id
-            else:
-                uci_print(f"bestmove {best_move.uci()}")
-        
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except Exception as e:
-        uci_print(f"info string Error in go command: {e}")
-
-        # Emergency move selection: NEVER answer with an arbitrary first
-        # legal move when avoidable — try a fast tactical search first,
-        # then fall back to a uniformly random legal move.
-        if not _superseded(search_id, state):
-            legal = list(board.legal_moves)
-            if not legal:
-                uci_print("bestmove 0000")
-            else:
-                fb = None
+def parse_go(tokens, board):
+    result = {}
+    i = 1
+    while i < len(tokens):
+        word = tokens[i]
+        if word in GO_VALUES and i + 1 < len(tokens):
+            number = _num(tokens[i + 1])
+            if number is not None:
+                result[word] = max(0, number)
+            i += 2
+        elif word == "searchmoves":
+            moves = []
+            i += 1
+            while i < len(tokens) and tokens[i] not in GO_WORDS:
                 try:
-                    cand = ab_filter.analyze(board)
-                    if cand.best_move in board.legal_moves:
-                        fb = cand.best_move
-                except Exception:
-                    fb = None
-                if fb is None:
-                    fb = random.choice(legal)
-                uci_print(f"bestmove {fb.uci()}")
-    finally:
-        mcts.is_searching = False
+                    move = board.parse_uci(tokens[i])
+                    if move and move not in moves:
+                        moves.append(move)
+                except ValueError:
+                    pass
+                i += 1
+            result[word] = moves
+        else:
+            if word in {"infinite", "ponder"}:
+                result[word] = True
+            i += 1
+    return result
 
 
-def _superseded(search_id, state):
-    """True if a newer 'go' command arrived while this search was running."""
-    return search_id != state["current_search_id"]
+def parse_time_from_go(tokens, board, max_think_time):
+    limits = parse_go(tokens, board)
+    if limits.get("infinite"):
+        return None, True
+    if "movetime" in limits:
+        return max(0.0, limits["movetime"] / 1000.0), False
+    remaining = limits.get("wtime" if board.turn else "btime")
+    if remaining is None:
+        return None, False
+    increment = limits.get("winc" if board.turn else "binc", 0)
+    # No minimum allocation that can exceed a nearly exhausted clock.
+    reserve = min(50, remaining * 0.1)
+    available = max(0, remaining - reserve)
+    moves = max(1, limits.get("movestogo", 30))
+    allocation = min(available / moves + increment * 0.8, available * 0.2)
+    return min(max_think_time, allocation / 1000), False
+
+
+def parse_position(tokens):
+    if len(tokens) < 2:
+        raise ValueError("Missing position")
+    if tokens[1] == "startpos":
+        board, index = chess.Board(), 2
+    elif tokens[1] == "fen":
+        index = tokens.index("moves") if "moves" in tokens else len(tokens)
+        board = chess.Board(" ".join(tokens[2:index]))
+    else:
+        raise ValueError("Unknown position format")
+    if not board.is_valid():
+        raise ValueError("Invalid chess position")
+    if index < len(tokens):
+        if tokens[index] != "moves":
+            raise ValueError("Expected moves")
+        for token in tokens[index + 1:]:
+            move = board.parse_uci(token)
+            if not move:
+                raise ValueError("Null moves are not game moves")
+            board.push(move)
+    return board
 
 
 def _parse_setoption(tokens):
-    """Parses a 'setoption' token list into (name, value_or_None).
-
-    Handles multi-word option names and the legal UCI case where no value
-    is provided (e.g. button-type options).
-    """
-    try:
-        name_idx = tokens.index("name") + 1
-    except ValueError:
+    lower = [t.lower() for t in tokens]
+    if "name" not in lower:
         return None, None
+    start = lower.index("name") + 1
+    end = lower.index("value") if "value" in lower else len(tokens)
+    return " ".join(lower[start:end]), " ".join(tokens[end + 1:]) if end < len(tokens) else None
 
-    if "value" in tokens:
-        value_idx = tokens.index("value")
-        opt_name = " ".join(tokens[name_idx:value_idx])
-        opt_value = " ".join(tokens[value_idx + 1:])
-        return opt_name, opt_value
 
-    opt_name = " ".join(tokens[name_idx:])
-    return opt_name, None
+@dataclass
+class SearchJob:
+    board: chess.Board
+    tokens: list
+    params: object
+    variety: bool
+    started: float = field(default_factory=time.monotonic)
+    stop: threading.Event = field(default_factory=threading.Event)
+    release: threading.Event = field(default_factory=threading.Event)
+    superseded: bool = False
+    emitted: bool = False
+
+
+class UciEngine:
+    def __init__(self):
+        base = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__)
+        self.path = os.path.join(base, "stockfish.exe")
+        self.difficulty = DifficultyController(10)
+        self.variety = False
+        self.board = chess.Board()
+        self.lock = threading.RLock()
+        self.job = None
+        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.evaluator = None
+        self.mcts = None
+        self.pending = self.pool.submit(self.initialize)
+
+    def initialize(self):
+        if self.evaluator:
+            self.evaluator.close()
+        self.evaluator = StockfishEvaluator(self.path)
+        self.mcts = MCTS(self.evaluator)
+
+    def supersede(self):
+        with self.lock:
+            if self.job:
+                self.job.superseded = True
+                self.job.stop.set()
+                self.job.release.set()
+
+    def emit(self, job, move, root=None):
+        with self.lock:
+            if job.superseded or job.emitted:
+                return
+            job.emitted = True
+            self.info(job, root, move)
+            uci_print(f"bestmove {move.uci()}")
+
+    def info(self, job, root, move=None):
+        with self.lock:
+            if job.superseded:
+                return
+            elapsed = max(1, int((time.monotonic() - job.started) * 1000))
+            nodes = root.visit_count if root is not None else 0
+            value = getattr(root, 'evaluation_value', 0.0)
+            if move is None and root and root.children:
+                child = max(root.children.values(), key=lambda c: c.visit_count + 12 * c.prior)
+                move = child.move
+                value = child.value if child.visit_count else value
+            score = 'mate 1' if getattr(root, 'proven_move', None) else 'cp ' + str(int(600 * math.atanh(max(-0.99, min(0.99, value)))))
+            depth = self.mcts.depth_reached if root else 0
+            uci_print(f"info depth {depth} score {score} nodes {nodes} nps {int(nodes*1000/elapsed)} time {elapsed} pv {move.uci() if move else ''}")
+
+    def search(self, job):
+        if job.superseded:
+            return
+        legal = list(job.board.legal_moves)
+        limits = parse_go(job.tokens, job.board)
+        if "searchmoves" in limits:
+            legal = [m for m in legal if m in limits["searchmoves"]]
+        best = legal[0] if legal else chess.Move.null()
+        root = None
+        try:
+            if legal and not job.stop.is_set():
+                params = job.params
+                budget, infinite = parse_time_from_go(job.tokens, job.board, params.max_think_time)
+                if budget is None and not infinite:
+                    budget = params.max_think_time
+                deadline = None if infinite else job.started + max(0, budget - min(0.01, budget * 0.1))
+                self.mcts.abort_search = False
+                self.mcts.cancel = job.stop.is_set
+                self.mcts.progress = lambda root: self.info(job, root)
+                self.mcts.c_puct = params.c_puct
+                self.mcts.num_simulations = max(1, limits.get("nodes", params.num_simulations))
+                if infinite and "nodes" not in limits:
+                    self.mcts.num_simulations = 1000000000
+                depth = limits.get("depth")
+                if "mate" in limits:
+                    depth = max(1, 2 * limits["mate"] - 1)
+                self.evaluator.depth = max(1, min(params.stockfish_depth, depth)) if depth else params.stockfish_depth
+                self.evaluator.multipv = params.stockfish_multipv
+                counts = self.mcts.get_visit_counts(job.board,
+                    add_noise=job.variety and params.add_noise,
+                    noise_epsilon=params.noise_epsilon, noise_alpha=params.noise_alpha,
+                    deadline=deadline, root_moves=legal, max_depth=max(1, depth) if depth is not None else None)
+                root = self.mcts.last_root
+                if job.variety:
+                    # Apply variety only to allowed roots.
+                    restricted = counts.copy()
+                    from board_encoder import encode_move
+                    allowed = {encode_move(m) for m in legal}
+                    action = select_move_with_variety(restricted, params, job.board)
+                    if action not in allowed:
+                        action = max(allowed, key=lambda a: counts[a])
+                else:
+                    # Root advice acts as a small virtual sample, preventing one
+                    # speculative visit from overturning the stronger root search.
+                    action = max(root.children, key=lambda a:
+                        root.children[a].visit_count + 12 * root.children[a].prior)
+                move = decode_move(action, job.board)
+                if getattr(root, 'proven_move', None) is not None:
+                    move = root.proven_move
+                if move in legal:
+                    best = move
+        except Exception as error:
+            uci_print(f"info string Search failed: {type(error).__name__}: {error}")
+        # Completed ponder/infinite searches must hold even terminal/fallback results.
+        if ("ponder" in limits or limits.get("infinite")) and not job.stop.is_set():
+            job.release.wait()
+        self.emit(job, best, root)
+
+    def handle(self, line):
+        tokens = line.split()
+        if not tokens:
+            return True
+        command = tokens[0]
+        if command == "uci":
+            uci_print("id name Praj MCTS v2.1")
+            uci_print("id author Praj")
+            uci_print("option name Difficulty type spin default 10 min 1 max 10")
+            uci_print("option name MoveVariety type check default false")
+            uci_print("option name Ponder type check default false")
+            uci_print("option name StockfishPath type string default stockfish.exe")
+            uci_print("option name Clear Hash type button")
+            uci_print("uciok")
+        elif command == "isready":
+            # Ready must wait for configuration, but never wait for an active search.
+            self.pending.add_done_callback(lambda future: uci_print("readyok"))
+        elif command == "setoption":
+            name, value = _parse_setoption(tokens)
+            if name == "difficulty" and value is not None:
+                number = _num(value)
+                if number is not None:
+                    self.difficulty.set_level(number)
+            elif name == "movevariety" and value is not None:
+                self.variety = value.lower() == "true"
+            elif name == "stockfishpath" and value:
+                if not os.path.isfile(value):
+                    uci_print("info string Rejected StockfishPath: file does not exist")
+                else:
+                    self.supersede()
+                    self.path = os.path.abspath(value)
+                    self.pending = self.pool.submit(self.initialize)
+            elif name == "clear hash":
+                self.supersede()
+                self.pending = self.pool.submit(self.clear_cache)
+        elif command == "ucinewgame":
+            self.supersede()
+            self.board = chess.Board()
+            self.pending = self.pool.submit(self.clear_cache)
+        elif command == "position":
+            self.supersede()
+            try:
+                self.board = parse_position(tokens)
+            except ValueError as error:
+                # Transactional: never commit an illegal or partially applied board.
+                uci_print(f"info string Rejected position: {error}")
+        elif command == "go":
+            self.supersede()
+            job = SearchJob(self.board.copy(), tokens, self.difficulty.get_params(), self.variety)
+            with self.lock:
+                self.job = job
+            self.pool.submit(self.search, job)
+        elif command == "stop":
+            with self.lock:
+                if self.job:
+                    self.job.stop.set()
+                    self.job.release.set()
+        elif command == "ponderhit":
+            with self.lock:
+                if self.job and "ponder" in self.job.tokens:
+                    self.job.release.set()
+        elif command == "quit":
+            return False
+        return True
+
+    def clear_cache(self):
+        self.mcts.clear_cache()
+        engine = self.evaluator.engine
+        if engine and engine.proc is not None:
+            engine.send("ucinewgame")
+            engine.send("isready")
+            engine.read_until("readyok", 5)
+
+    def close(self):
+        self.supersede()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        if self.evaluator:
+            self.evaluator.close()
 
 
 def main():
-    if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
-    else:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-    stockfish_path = os.path.join(base_dir, "stockfish.exe")
-
-    difficulty = DifficultyController(level=10)
-    params = difficulty.get_params()
-
-    evaluator = StockfishEvaluator(
-        stockfish_path=stockfish_path,
-        depth=params.stockfish_depth
-    )
-    mcts = MCTS(
-        evaluator=evaluator,
-        c_puct=params.c_puct,
-        num_simulations=params.num_simulations
-    )
-    mcts.abort_search = False
-    mcts.is_searching = False
-
-    # Thread-safe abort signal: the main thread sets it, the worker checks it.
-    abort_event = threading.Event()
-
-    ab_filter = AlphaBetaFilter(depth=params.ab_depth)
-    
-    # GUIs pipe stdout (block-buffered by default). Force line buffering so
-    # protocol lines are never stuck in an 8 KB buffer, even if some code
-    # path prints without flushing.
+    engine = UciEngine()
     try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+        for line in sys.stdin:
+            try:
+                if not engine.handle(line):
+                    break
+            except (ValueError, OSError) as error:
+                uci_print(f"info string Command rejected: {error}")
+    finally:
+        engine.close()
 
-    input_queue = queue.Queue()
-    
-    # Isolate stdin reading
-    reader_thread = threading.Thread(target=stdin_reader, args=(input_queue,), daemon=True)
-    reader_thread.start()
-
-    # Worker pool for async Stockfish/MCTS heavy calculations.
-    # Single worker: searches run one at a time; superseded searches are
-    # detected via search IDs so exactly one bestmove is printed per 'go'.
-    worker_pool = ThreadPoolExecutor(max_workers=1)
-
-    # Search bookkeeping: every 'go' increments the counter; only the search
-    # whose ID matches the latest counter may print bestmove.
-    state = {"current_search_id": 0, "stop_requested": False,
-             "ponder": False, "ponder_best": None, "ponder_best_id": -1}
-    
-    board = chess.Board()
-    move_variety = False
-
-    while True:
-        try:
-            msg_type, line = input_queue.get()
-            if msg_type == "exit":
-                break
-                
-            tokens = line.split()
-            if not tokens:
-                continue
-            cmd = tokens[0]
-
-            if cmd == "uci":
-                uci_print("id name Praj MCTS v2.0")
-                uci_print("id author Praj")
-                uci_print("option name Difficulty type spin default 10 min 1 max 10")
-                uci_print("option name MoveVariety type check default false")
-                uci_print("option name StockfishPath type string default stockfish.exe")
-                uci_print("uciok")
-                
-            elif cmd == "isready":
-                uci_print("readyok")
-                
-            elif cmd == "setoption":
-                opt_name, opt_value = _parse_setoption(tokens)
-                
-                if opt_name == "Difficulty" and opt_value is not None:
-                    # Safe to apply mid-search (plain attribute reads used by
-                    # the next simulation). Do NOT supersede the in-flight
-                    # search here, or it would go silent without a bestmove.
-                    try:
-                        level = int(opt_value)
-                    except ValueError:
-                        level = difficulty.level
-                    difficulty.set_level(level)
-                    params = difficulty.get_params()
-                    
-                    mcts.num_simulations = params.num_simulations
-                    mcts.c_puct = params.c_puct
-                    evaluator.depth = params.stockfish_depth
-                    if hasattr(evaluator, "multipv"):
-                        evaluator.multipv = params.stockfish_multipv
-                    ab_filter.depth = params.ab_depth
-                    
-                    uci_print(f"info string Difficulty set to {level} "
-                               f"(sims={params.num_simulations}, "
-                               f"temp={params.temperature}, "
-                               f"ab_depth={params.ab_depth})")
-                    
-                elif opt_name == "MoveVariety" and opt_value is not None:
-                    move_variety = opt_value.lower() == "true"
-                    uci_print(f"info string MoveVariety set to {move_variety}")
-                    
-                elif opt_name == "StockfishPath" and opt_value:
-                    abort_event.set()
-                    mcts.abort_search = True
-                    state["current_search_id"] += 1
-                    # Security: validate that the path points to a Stockfish binary
-                    basename = os.path.basename(opt_value).lower()
-                    allowed_names = {"stockfish", "stockfish.exe"}
-                    if basename not in allowed_names:
-                        uci_print(f"info string Rejected StockfishPath: basename '{basename}' "
-                                   f"must be 'stockfish' or 'stockfish.exe'")
-                    elif not os.path.isfile(opt_value):
-                        uci_print(f"info string Rejected StockfishPath: file not found at '{opt_value}'")
-                    else:
-                        stockfish_path = opt_value
-                        evaluator.close()
-                        evaluator = StockfishEvaluator(
-                            stockfish_path=stockfish_path,
-                            depth=params.stockfish_depth
-                        )
-                        # Cached evaluations came from the old evaluator; drop them.
-                        mcts.evaluator = evaluator
-                        mcts.clear_cache()
-                        uci_print(f"info string Re-initialized Stockfish at {stockfish_path}")
-
-            elif cmd == "ucinewgame":
-                abort_event.set()
-                mcts.abort_search = True
-                state["ponder"] = False
-                state["ponder_best"] = None
-                board = chess.Board()
-                mcts.transposition_table.clear()
-                
-            elif cmd == "position":
-                abort_event.set()
-                mcts.abort_search = True
-                state["ponder"] = False
-                state["ponder_best"] = None
-                try:
-                    if len(tokens) < 2:
-                        continue
-                    
-                    temp_board = None
-                    moves_idx = -1
-                    if tokens[1] == "startpos":
-                        temp_board = chess.Board()
-                        if "moves" in tokens:
-                            moves_idx = tokens.index("moves")
-                    elif tokens[1] == "fen":
-                        fen_tokens = []
-                        idx = 2
-                        while idx < len(tokens) and tokens[idx] != "moves":
-                            fen_tokens.append(tokens[idx])
-                            idx += 1
-                        fen_str = " ".join(fen_tokens)
-                        temp_board = chess.Board(fen_str)
-                        if idx < len(tokens) and tokens[idx] == "moves":
-                            moves_idx = idx
-                    
-                    if temp_board is None:
-                        uci_print(f"info string Unrecognised position format: {tokens[1]}; "
-                                  f"reverting to startpos")
-                        temp_board = chess.Board()
-
-                    if moves_idx != -1:
-                        for move_str in tokens[moves_idx+1:]:
-                            move = chess.Move.from_uci(move_str)
-                            temp_board.push(move)
-                    
-                    board = temp_board
-                except Exception as e:
-                    # Never keep a half-updated/stale board: the GUI believes
-                    # its position command succeeded. Revert to a known state.
-                    uci_print(f"info string Error in position command ({e}); "
-                              f"reverting to startpos")
-                    board = chess.Board()
-                        
-            elif cmd == "go":
-                # Clear stop flag
-                state["stop_requested"] = False
-                is_ponder = "ponder" in tokens
-                state["ponder"] = is_ponder
-                state["ponder_best"] = None
-                # Invalidate any in-flight search: it must not print bestmove.
-                abort_event.set()
-                mcts.abort_search = True
-                state["current_search_id"] += 1
-                my_search_id = state["current_search_id"]
-                # Offload heavy intense calculations immediately
-                worker_pool.submit(
-                    execute_go, 
-                    mcts, 
-                    ab_filter, 
-                    evaluator, 
-                    difficulty, 
-                    tokens, 
-                    board.copy(), 
-                    move_variety,
-                    my_search_id,
-                    state,
-                    abort_event
-                )
-                
-            elif cmd == "quit":
-                abort_event.set()
-                mcts.abort_search = True
-                break
-                
-            elif cmd == "ponderhit":
-                # Opponent played the predicted move: adopt the ponder search.
-                if state.pop("ponder", False):
-                    best = state.get("ponder_best")
-                    if best is not None and state.get("ponder_best_id") == state["current_search_id"]:
-                        state["ponder_best"] = None
-                        uci_print(f"bestmove {best}")
-                    # else: search still running — completion will print now
-                    #       that the ponder flag is cleared.
-
-            elif cmd == "stop":
-                state["stop_requested"] = True
-                abort_event.set()
-                mcts.abort_search = True
-
-        except (KeyboardInterrupt, SystemExit):
-            break
-        except Exception as e:
-            uci_print(f"info string Error in main loop: {e}")
-
-    worker_pool.shutdown(wait=False)
-    evaluator.close()
 
 if __name__ == "__main__":
-    import multiprocessing
-    multiprocessing.freeze_support()
     main()

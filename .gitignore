@@ -40,3 +40,5 @@ Contacts/
 
 # Misc
 input.txt
+# Local audit environment (results are intentionally tracked separately).
+.venv-audit/

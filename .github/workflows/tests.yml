@@ -1,0 +1,19 @@
+name: Engine regression tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-engine.txt
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: sudo apt-get update && sudo apt-get install -y stockfish
+      - run: ln -s /usr/games/stockfish stockfish.exe
+      - run: python -m unittest tests test_audit -v
+      - run: python alpha_beta.py

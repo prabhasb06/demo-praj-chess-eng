@@ -7,6 +7,7 @@ Skips PyTorch neural network tests if PyTorch is not installed.
 
 import os
 import shutil
+from board_encoder import POLICY_SIZE
 import unittest
 import numpy as np
 import chess
@@ -56,7 +57,7 @@ class TestBoardEncoder(unittest.TestCase):
         
         action = encode_move(move)
         # Verify action index is in [0, 4095]
-        self.assertTrue(0 <= action < 4096)
+        self.assertTrue(0 <= action < POLICY_SIZE)
         
         decoded = decode_move(action, board)
         self.assertEqual(move, decoded)
@@ -64,7 +65,7 @@ class TestBoardEncoder(unittest.TestCase):
     def test_legal_move_mask(self):
         board = chess.Board()
         mask = get_legal_move_mask(board)
-        self.assertEqual(mask.shape, (4096,))
+        self.assertEqual(mask.shape, (POLICY_SIZE,))
         # Start position has 20 legal moves
         self.assertEqual(np.sum(mask), 20)
 
@@ -78,16 +79,16 @@ class TestNeuralNet(unittest.TestCase):
         
         policy_logits, value, moves_left = model(dummy_input)
         
-        self.assertEqual(policy_logits.shape, (2, 4096))
+        self.assertEqual(policy_logits.shape, (2, POLICY_SIZE))
         self.assertEqual(value.shape, (2, 1))
         self.assertEqual(moves_left.shape, (2, 1))
 
     def test_loss_function(self):
-        policy_logits = torch.randn(4, 4096)
+        policy_logits = torch.randn(4, POLICY_SIZE)
         value = torch.tanh(torch.randn(4, 1))
         moves_left = torch.relu(torch.randn(4, 1))
         
-        target_policy = torch.softmax(torch.randn(4, 4096), dim=-1)
+        target_policy = torch.softmax(torch.randn(4, POLICY_SIZE), dim=-1)
         target_value = torch.tensor([1.0, -1.0, 0.0, 0.5])
         target_moves_left = torch.tensor([10.0, 15.0, 20.0, 25.0])
         
@@ -119,7 +120,7 @@ class TestMCTS(unittest.TestCase):
         
         # Verify move probability vector shape
         probs = mcts.get_move_probs(board, temp=0.0)
-        self.assertEqual(probs.shape, (4096,))
+        self.assertEqual(probs.shape, (POLICY_SIZE,))
         self.assertEqual(np.sum(probs), 1.0)
         self.assertEqual(np.sum(probs > 0), 1) # temp=0.0 should yield one-hot max visited
 
@@ -149,7 +150,7 @@ class TestMCTS(unittest.TestCase):
         
         # Evaluator should fallback gracefully without crashing
         policy, value = evaluator.evaluate(board)
-        self.assertEqual(policy.shape, (4096,))
+        self.assertEqual(policy.shape, (POLICY_SIZE,))
         self.assertTrue(-1.0 <= value <= 1.0)
         self.assertAlmostEqual(float(np.sum(policy)), 1.0, places=5)
 
@@ -167,7 +168,7 @@ class TestMCTS(unittest.TestCase):
         policy, value = evaluator.evaluate(board)
         evaluator.close()
         
-        self.assertEqual(policy.shape, (4096,))
+        self.assertEqual(policy.shape, (POLICY_SIZE,))
         self.assertTrue(-1.0 <= value <= 1.0)
         self.assertAlmostEqual(float(np.sum(policy)), 1.0, places=5)
         # Ensure it actually runs search and evaluates moves
@@ -195,7 +196,7 @@ class TestSelfPlay(unittest.TestCase):
     def test_replay_buffer(self):
         buffer = ReplayBuffer(capacity=10)
         state = np.random.randn(18, 8, 8)
-        policy = np.random.randn(4096)
+        policy = np.random.randn(POLICY_SIZE)
         policy = np.abs(policy)
         policy /= np.sum(policy)
         
@@ -218,7 +219,7 @@ class TestSelfPlay(unittest.TestCase):
         # Check components of generated data
         state, policy, value, moves_left = game_data[0]
         self.assertEqual(state.shape, (18, 8, 8))
-        self.assertEqual(policy.shape, (4096,))
+        self.assertEqual(policy.shape, (POLICY_SIZE,))
         self.assertTrue(-1.0 <= value <= 1.0)
 
 

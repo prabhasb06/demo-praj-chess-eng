@@ -1,0 +1,71 @@
+{
+  "movetime_ms": 150,
+  "positions": [
+    {
+      "name": "start",
+      "move": "e2e4",
+      "reference": "e2e4",
+      "legal": true,
+      "elapsed_ms": 158.12,
+      "cp_loss": 10
+    },
+    {
+      "name": "kiwipete",
+      "move": "e2a6",
+      "reference": "d5e6",
+      "legal": true,
+      "elapsed_ms": 155.07,
+      "cp_loss": 3
+    },
+    {
+      "name": "scholar",
+      "move": "h5f7",
+      "reference": "h5f7",
+      "legal": true,
+      "elapsed_ms": 35.51,
+      "cp_loss": 0
+    },
+    {
+      "name": "backrank",
+      "move": "a1a8",
+      "reference": "a1a8",
+      "legal": true,
+      "elapsed_ms": 34.73,
+      "cp_loss": 0
+    },
+    {
+      "name": "rook_underpromotion",
+      "move": "f1e2",
+      "reference": "f1e2",
+      "legal": true,
+      "elapsed_ms": 159.09,
+      "cp_loss": 5
+    },
+    {
+      "name": "knight_underpromotion",
+      "move": "f7f8r",
+      "reference": "g5f6",
+      "legal": true,
+      "elapsed_ms": 159.83,
+      "cp_loss": 2
+    },
+    {
+      "name": "endgame",
+      "move": "b4f4",
+      "reference": "b4f4",
+      "legal": true,
+      "elapsed_ms": 158.74,
+      "cp_loss": 0
+    },
+    {
+      "name": "middlegame",
+      "move": "c4c5",
+      "reference": "c4c5",
+      "legal": true,
+      "elapsed_ms": 159.9,
+      "cp_loss": 0
+    }
+  ],
+  "mean_cp_loss": 2.5,
+  "max_elapsed_ms": 159.9
+}

@@ -1,0 +1,3 @@
+# Lightweight runtime; neural training dependencies are in requirements.txt.
+python-chess>=1.999,<2
+numpy>=1.26,<3

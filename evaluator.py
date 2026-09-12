@@ -5,13 +5,14 @@ Computes Elo difference and determines promotion based on win-rate benchmarks.
 """
 
 import math
+import random
 import chess
 import numpy as np
 from typing import Tuple
 from mcts import MCTS
 from board_encoder import decode_move
 
-def play_match_game(mcts_white: MCTS, mcts_black: MCTS) -> float:
+def play_match_game(mcts_white: MCTS, mcts_black: MCTS, initial_board=None) -> float:
     """
     Plays a single match game between two MCTS engines.
     Temperature is set to 0.0 for deterministic play.
@@ -20,7 +21,7 @@ def play_match_game(mcts_white: MCTS, mcts_black: MCTS) -> float:
       0.5 if Draw
       0.0 if Black wins
     """
-    board = chess.Board()
+    board = initial_board.copy() if initial_board is not None else chess.Board()
     move_count = 0
     
     while not board.is_game_over() and move_count < 250:
@@ -53,6 +54,8 @@ def evaluate_candidate(candidate_evaluator, best_evaluator, num_games=400, num_s
       - delta_elo: Elo rating difference
       - promoted: True if win_rate >= 0.55, False otherwise
     """
+    if num_games <= 0 or num_sims <= 0:
+        raise ValueError('num_games and num_sims must be positive')
     candidate_mcts = MCTS(candidate_evaluator, c_puct=1.5, num_simulations=num_sims)
     best_mcts = MCTS(best_evaluator, c_puct=1.5, num_simulations=num_sims)
 
@@ -60,16 +63,25 @@ def evaluate_candidate(candidate_evaluator, best_evaluator, num_games=400, num_s
     
     print(f"Starting evaluation match: Candidate vs. Current Best ({num_games} games, {num_sims} simulations/move).")
 
+    rng = random.Random(20260912)
     for i in range(num_games):
+        if i % 2 == 0:
+            initial = chess.Board()
+            for _ in range(6):
+                if initial.is_game_over():
+                    break
+                initial.push(rng.choice(list(initial.legal_moves)))
+        candidate_mcts.clear_cache()
+        best_mcts.clear_cache()
         # Alternate sides
         if i % 2 == 0:
             # Candidate is White
-            score = play_match_game(candidate_mcts, best_mcts)
+            score = play_match_game(candidate_mcts, best_mcts, initial)
             candidate_score += score
             winner_str = "Candidate(W)" if score == 1.0 else "Best(B)" if score == 0.0 else "Draw"
         else:
             # Candidate is Black
-            score = play_match_game(best_mcts, candidate_mcts)
+            score = play_match_game(best_mcts, candidate_mcts, initial)
             # Candidate score is 1.0 - White score (since Candidate is Black)
             score_black = 1.0 - score
             candidate_score += score_black
