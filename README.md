@@ -11,7 +11,7 @@ python -m pip install -r requirements-engine.txt
 python main.py
 ```
 
-On Windows, add `dist/praj_mcts_2_1.exe` to your chess GUI. Keep `stockfish.exe` beside that executable. The old `dist/uci_engine.exe` is retained and is **not** the audited build. The new executable runs the Stockfish-assisted engine without needing Python or PyTorch installed.
+The audited Windows executable is a local build artifact under `dist/`; it is not included in this Git repository, and this repository does not yet provide a reproducible binary-release recipe. A separately obtained Stockfish executable can be configured through `StockfishPath`. The packaged engine bundles runtime dependencies; review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistributing any binary.
 
 On other platforms, put the matching native Stockfish executable at `stockfish.exe` beside the Python source (the filename is historical), or set the UCI `StockfishPath` option to its absolute path. Linux CI is configured, but this audit was executed on Windows.
 
@@ -72,4 +72,8 @@ Matches use paired openings with reversed colors, preserve move history and save
 
 The C++ file is a nonfunctional reference sketch, excluded from CMake by default. It is not an alternative production engine.
 
-Project source is MIT-licensed. Stockfish is a separate dependency with its own license.
+## Licensing and model weights
+
+The root [LICENSE](LICENSE) declares MIT terms for project-owned code, subject to the named rights holder having authority to grant them. This alone does not establish the licensing terms for the complete engine distribution. In particular, the runtime depends on `python-chess` (GPL-3.0-or-later), and the PyInstaller executable bundles runtime dependencies. Resolve the licensing of the combined application and meet the applicable notices/source obligations for exact packaged versions before redistributing a binary or advertising the complete engine as MIT-only. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+No trained model checkpoint/weights are currently published. The model format and training code are present, but this is not yet an open-weight release. The tracked logo files have no verified provenance/license in the repository; do not assume the project MIT license covers them.

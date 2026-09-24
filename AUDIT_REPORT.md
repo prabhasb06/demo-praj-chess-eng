@@ -2,7 +2,7 @@
 
 ## Result
 
-A substantially stronger, tested **release candidate** is available as `dist/praj_mcts_2_1.exe`. Keep the existing `dist/stockfish.exe` beside it. No changes were committed or pushed, and the previous executable was preserved.
+A substantially stronger, tested **release candidate** was produced as `dist/praj_mcts_2_1.exe`. This executable is a local build artifact and is not tracked in the repository. The source fixes and regression coverage from this audit were subsequently committed to `main` as `b8a62bbca28426ff27dd8146faf3f97925766d43` and pushed to the configured GitHub repository. The previous local executable was preserved during the audit.
 
 Baseline: commit `cd7577803385c87f3c218349b4cdbcf4090ae526`, clean working tree at audit start. A runnable original-source snapshot is at `C:\Users\prabh\chess_engine_audit_baseline_20260912`.
 
