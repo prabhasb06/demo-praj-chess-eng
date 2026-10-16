@@ -11,7 +11,7 @@ python -m pip install -r requirements-engine.txt
 python main.py
 ```
 
-The audited Windows executable is a local build artifact under `dist/`; it is not included in this Git repository, and this repository does not yet provide a reproducible binary-release recipe. A separately obtained Stockfish executable can be configured through `StockfishPath`. The packaged engine bundles runtime dependencies; review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) before redistributing any binary.
+See [RELEASE.md](RELEASE.md) for the pinned Windows build recipe, source packaging, and release limitations. Executables under `dist/` are build artifacts rather than tracked source. A separately obtained Stockfish executable can be configured through `StockfishPath`. Release bundles include the source, matching dependency sources, licenses, and a hash manifest alongside the executable.
 
 On other platforms, put the matching native Stockfish executable at `stockfish.exe` beside the Python source (the filename is historical), or set the UCI `StockfishPath` option to its absolute path. Linux CI is configured, but this audit was executed on Windows.
 
@@ -74,6 +74,6 @@ The C++ file is a nonfunctional reference sketch, excluded from CMake by default
 
 ## Licensing and model weights
 
-The root [LICENSE](LICENSE) declares MIT terms for project-owned code, subject to the named rights holder having authority to grant them. This alone does not establish the licensing terms for the complete engine distribution. In particular, the runtime depends on `python-chess` (GPL-3.0-or-later), and the PyInstaller executable bundles runtime dependencies. Resolve the licensing of the combined application and meet the applicable notices/source obligations for exact packaged versions before redistributing a binary or advertising the complete engine as MIT-only. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Praj is the engine name; Prabhas is the author, and development used AI-generated code. The project's original code retains the MIT grant in [LICENSE](LICENSE). The complete application incorporating `python-chess` is distributed under GPL-3.0-or-later; see [COPYING](COPYING) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Preserve both the MIT notice and applicable dependency notices when redistributing it.
 
-No trained model checkpoint/weights are currently published. The model format and training code are present, but this is not yet an open-weight release. The tracked logo files have no verified provenance/license in the repository; do not assume the project MIT license covers them.
+No trained model checkpoint/weights are currently published. The model format and training code are present, but this is not yet an open-weight release. The UCI engine uses Stockfish-guided MCTS or static fallback, rather than a trained neural checkpoint. The unverified logo files are excluded from source release archives and binary bundles.

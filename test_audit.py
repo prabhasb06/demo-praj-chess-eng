@@ -201,6 +201,8 @@ class Session:
         self.reader.start()
         self.send("uci")
         self.until("uciok")
+        if os.environ.get("PRAJ_STOCKFISH_PATH"):
+            self.send("setoption name StockfishPath value " + os.environ["PRAJ_STOCKFISH_PATH"])
         self.send("isready")
         self.until("readyok")
 
@@ -233,7 +235,6 @@ class Session:
             pipe.close()
 
 
-@unittest.skipUnless((REPO / "stockfish.exe").exists(), "Stockfish binary required")
 class AuditProtocol(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

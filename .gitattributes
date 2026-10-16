@@ -1,0 +1,4 @@
+# Unverified artwork is retained locally but omitted from source release archives.
+/logo.png export-ignore
+/stockfish_logo.png export-ignore
+/Contacts export-ignore

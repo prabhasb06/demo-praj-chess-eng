@@ -1,0 +1,12 @@
+# Validated release toolchain: Windows x86-64, CPython 3.13.
+# Install in a fresh venv without --system-site-packages.
+python-chess==1.999
+chess==1.11.2
+numpy==2.4.6
+pyinstaller==6.20.0
+pyinstaller-hooks-contrib==2026.6
+altgraph==0.17.5
+packaging==26.3
+setuptools==82.0.1
+pefile==2024.8.26; sys_platform == 'win32'
+pywin32-ctypes==0.2.3; sys_platform == 'win32'
