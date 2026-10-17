@@ -9,9 +9,20 @@ import unittest
 import zipfile
 
 from prepare_release import ROOT, VERSION, clean_commit, inspect_source, sha256, write_manifest
+from prepare_release import (write_runtime_archive, inspect_runtime,
+                             write_developer_archive, verify_developer_archive)
+from engine_info import EXECUTABLE, SOURCES_URL
 
 
 class ReleaseChecks(unittest.TestCase):
+    def make_candidate(self, output):
+        (output / "bin").mkdir()
+        (output / "bin" / EXECUTABLE).write_bytes(b"example binary")
+        (output / "licenses").mkdir()
+        (output / "licenses" / "example.txt").write_text("dependency notice")
+        for name in ("LICENSE", "COPYING", "THIRD_PARTY_NOTICES.md"):
+            (output / name).write_text("license fixture")
+
     def make_archive(self, path, extra=(), missing=()):
         with zipfile.ZipFile(path, "w") as archive:
             for name in ("main.py", "LICENSE", "COPYING", "RELEASE.md", "requirements-release.txt", *extra):
@@ -24,6 +35,37 @@ class ReleaseChecks(unittest.TestCase):
             self.make_archive(path)
             self.assertEqual(inspect_source(path), 5)
             self.assertEqual(len(sha256(path)), 64)
+
+    def test_user_zip_runs_after_one_extraction(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            self.make_candidate(output)
+            bundle = output / "windows.zip"
+            write_runtime_archive(output, bundle)
+            names = inspect_runtime(bundle)
+            self.assertIn(EXECUTABLE, names)
+            self.assertEqual({name.split("/")[0] for name in names},
+                             {EXECUTABLE, "README.txt", "licenses"})
+            self.assertFalse(any(name.endswith(".zip") for name in names))
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertIn(SOURCES_URL, archive.read("README.txt").decode())
+
+    def test_developer_download_contains_expanded_project_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            self.make_candidate(output)
+            self.make_archive(output / f"praj-{VERSION}-source.zip")
+            (output / "sources").mkdir()
+            (output / "sources" / "dependency.tar.gz").write_bytes(b"source fixture")
+            manifest = {"commit": "fixture", "sha256": {"bin/" + EXECUTABLE:
+                        sha256(output / "bin" / EXECUTABLE)},
+                        "dependency_sources": [{"filename": "dependency.tar.gz"}]}
+            bundle = output / "sources.zip"
+            write_developer_archive(output, bundle, manifest)
+            self.assertEqual(verify_developer_archive(bundle)["commit"], "fixture")
+            with zipfile.ZipFile(bundle) as archive:
+                self.assertIn("engine/main.py", archive.namelist())
+                self.assertFalse(any(name.endswith(".zip") for name in archive.namelist()))
 
     def test_rejects_unverified_assets_and_binaries(self):
         with tempfile.TemporaryDirectory() as folder:

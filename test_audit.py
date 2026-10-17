@@ -16,6 +16,7 @@ from alpha_beta import MATE_SCORE, alpha_beta, quiescence
 from board_encoder import (POLICY_SIZE, encode_move, decode_move, encode_move_for_perspective,
                            decode_move_for_perspective, get_legal_move_mask)
 from mcts import MCTS, StockfishEvaluator, MCTSNode
+from engine_info import NAME, VERSION, AUTHOR
 from uci_engine import parse_position, parse_time_from_go, _num
 
 REPO = pathlib.Path(__file__).parent
@@ -200,7 +201,7 @@ class Session:
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
         self.send("uci")
-        self.until("uciok")
+        _, self.startup_lines = self.until("uciok")
         if os.environ.get("PRAJ_STOCKFISH_PATH"):
             self.send("setoption name StockfishPath value " + os.environ["PRAJ_STOCKFISH_PATH"])
         self.send("isready")
@@ -248,6 +249,26 @@ class AuditProtocol(unittest.TestCase):
         self.session.send("position startpos")
         self.session.send("isready")
         self.session.until("readyok")
+
+    def test_startup_identity_is_clean_and_correct(self):
+        lines = self.session.startup_lines
+        self.assertEqual(lines[0], f"{NAME} {VERSION} by {AUTHOR}")
+        self.assertIn(f"id name {NAME} {VERSION}", lines)
+        self.assertIn(f"id author {AUTHOR}", lines)
+        self.assertFalse(any(line.startswith("info ") or "\x1b" in line for line in lines))
+
+    def test_console_help_and_board_are_explicit_commands(self):
+        self.session.send("help")
+        self.session.send("isready")
+        _, lines = self.session.until("readyok")
+        self.assertTrue(any("go movetime 1000" in line for line in lines))
+        self.session.send("position startpos moves e2e4")
+        self.session.send("d")
+        self.session.send("isready")
+        _, lines = self.session.until("readyok")
+        board = chess.Board()
+        board.push_uci("e2e4")
+        self.assertIn("Fen: " + board.fen(), lines)
 
     def best(self, go, timeout=5):
         self.session.send(go)

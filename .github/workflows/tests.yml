@@ -35,5 +35,5 @@ jobs:
       - name: Validate packaged engine without Stockfish
         shell: pwsh
         run: |
-          $env:PRAJ_ENGINE_EXE = (Get-ChildItem dist/release-2.1-*/bin/praj_mcts_2_1.exe).FullName
+          $env:PRAJ_ENGINE_EXE = (Get-ChildItem dist/release-2.1-*/bin/praj.exe).FullName
           .\.venv-release\Scripts\python.exe -m unittest test_audit.AuditProtocol -v

@@ -184,8 +184,6 @@ class StockfishEvaluator(EvaluatorBase):
         self.deadline = None
         self.cancel = lambda: False
         self.cacheable = True
-        if self.engine.proc is None:
-            uci_print("info string Stockfish unavailable; using static evaluation")
 
     def _heuristic_evaluate(self, board):
         from alpha_beta import evaluate_board

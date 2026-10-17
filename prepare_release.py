@@ -17,9 +17,9 @@ import tempfile
 import urllib.request
 import zipfile
 
+from engine_info import VERSION, RELEASE_VERSION, EXECUTABLE, RELEASE_URL, SOURCES_NAME, SOURCES_URL
 
 ROOT = Path(__file__).resolve().parent
-VERSION = "2.1"
 FORBIDDEN_SUFFIXES = {".exe", ".dll", ".pt", ".pth", ".onnx"}
 FORBIDDEN_ASSETS = {"logo.png", "stockfish_logo.png", "desktop.ini"}
 
@@ -164,6 +164,108 @@ def protocol_check(binary, stockfish=None):
     return result.stdout + result.stderr
 
 
+def quick_start():
+    return (
+        f"Praj {VERSION} - Windows x64\nBy Prabhas\n\n"
+        f"Extract this ZIP once. The engine is {EXECUTABLE} in this folder.\n"
+        "You do not need to extract or download any source archive to run it.\n\n"
+        "PLAY WITH A CHESS BOARD\n"
+        f"Add {EXECUTABLE} as a UCI engine in your preferred chess GUI.\n\n"
+        "USE THE TERMINAL\n"
+        f"Double-click {EXECUTABLE}, or run it in a terminal. Like Stockfish,\n"
+        "this is a plain-text UCI console; it does not display a graphical board.\n"
+        "Type help to see commands. For a quick search, enter these one at a time:\n"
+        "  uci\n  isready\n  position startpos\n  go movetime 1000\n"
+        "Wait for bestmove, then type quit to exit. Type d to display the board.\n\n"
+        "STOCKFISH ASSISTANCE\n"
+        "Stockfish is a separate optional download. Put its executable beside\n"
+        f"{EXECUTABLE} with the filename stockfish.exe, or configure the UCI option:\n"
+        "  setoption name StockfishPath value C:\\path\\to\\stockfish.exe\n"
+        "Without it, Praj uses a substantially weaker static evaluator.\n\n"
+        "LICENSES AND SOURCE\n"
+        "Keep the licenses folder when redistributing the engine. The combined\n"
+        "application is GPL-3.0-or-later; original project code retains MIT.\n"
+        "Complete matching project/dependency sources are a separate free download:\n"
+        f"{SOURCES_URL}\n\nRelease notes and checksums:\n{RELEASE_URL}\n"
+    )
+
+
+def write_runtime_archive(output, bundle):
+    """The user download contains just the engine, quick start, and notices."""
+    with zipfile.ZipFile(bundle, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.write(output / "bin" / EXECUTABLE, EXECUTABLE)
+        archive.writestr("README.txt", quick_start())
+        for path in sorted((output / "licenses").rglob("*")):
+            if path.is_file():
+                archive.write(path, "licenses/" + path.relative_to(output / "licenses").as_posix())
+        for name, target in (("LICENSE", "PROJECT-MIT.txt"), ("COPYING", "COPYING.txt"),
+                             ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.txt")):
+            archive.write(output / name, "licenses/" + target)
+
+
+def inspect_runtime(bundle):
+    with zipfile.ZipFile(bundle) as archive:
+        names = archive.namelist()
+        if {name.split("/")[0] for name in names} != {EXECUTABLE, "README.txt", "licenses"}:
+            raise RuntimeError("User ZIP must open directly to the executable, README, and licenses")
+        for name in names:
+            if (".." in Path(name).parts or Path(name).is_absolute()
+                    or name.lower().endswith((".zip", ".tar.gz", ".tgz"))):
+                raise RuntimeError(f"Unexpected user ZIP entry: {name}")
+        for name in (EXECUTABLE, "README.txt", "licenses/COPYING.txt", "licenses/PROJECT-MIT.txt"):
+            if name not in names:
+                raise RuntimeError(f"Missing runtime file: {name}")
+        if SOURCES_URL not in archive.read("README.txt").decode("utf-8"):
+            raise RuntimeError("User ZIP must point to the matching corresponding-source download")
+    return names
+
+
+def write_developer_archive(output, bundle, manifest):
+    """Expand project source into the developer download; no nested project ZIP."""
+    hashes = {}
+    with zipfile.ZipFile(bundle, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        def add_file(path, name):
+            archive.write(path, name)
+            hashes[name] = sha256(path)
+
+        with zipfile.ZipFile(output / f"praj-{VERSION}-source.zip") as source:
+            for entry in source.infolist():
+                if entry.is_dir():
+                    continue
+                name = "engine/" + entry.filename.removeprefix(f"praj-{VERSION}/")
+                data = source.read(entry)
+                archive.writestr(name, data)
+                hashes[name] = hashlib.sha256(data).hexdigest()
+        for folder, target in (("sources", "third-party"), ("licenses", "licenses")):
+            for path in sorted((output / folder).rglob("*")):
+                if path.is_file():
+                    add_file(path, target + "/" + path.relative_to(output / folder).as_posix())
+        for name in ("validation-fallback.txt", "validation-stockfish.txt", "VALIDATION.md"):
+            if (output / name).exists():
+                add_file(output / name, "build-info/" + name)
+        source_manifest = dict(manifest, sha256=hashes,
+                               binary_sha256=manifest["sha256"]["bin/" + EXECUTABLE])
+        archive.writestr("build-info/manifest.json", json.dumps(source_manifest, indent=2) + "\n")
+
+
+def verify_developer_archive(bundle):
+    with zipfile.ZipFile(bundle) as archive:
+        manifest = json.loads(archive.read("build-info/manifest.json"))
+        actual = {name for name in archive.namelist() if name != "build-info/manifest.json"}
+        if actual != set(manifest["sha256"]):
+            raise RuntimeError("Corresponding-source inventory does not match")
+        for name, expected in manifest["sha256"].items():
+            if hashlib.sha256(archive.read(name)).hexdigest() != expected:
+                raise RuntimeError(f"Corresponding-source checksum mismatch: {name}")
+        for name in ("engine/main.py", "engine/COPYING"):
+            if name not in actual:
+                raise RuntimeError(f"Missing corresponding source file: {name}")
+        for component in manifest.get("dependency_sources", []):
+            if "third-party/" + component["filename"] not in actual:
+                raise RuntimeError("Missing matching dependency source")
+    return manifest
+
+
 def finalize_candidate(output, stockfish=None):
     output = output.resolve()
     if not output.is_relative_to((ROOT / "dist").resolve()):
@@ -171,7 +273,7 @@ def finalize_candidate(output, stockfish=None):
     manifest = verify_manifest(output)
     if manifest["commit"] != clean_commit():
         raise RuntimeError("Candidate must match the current clean source commit")
-    binary = output / "bin" / "praj_mcts_2_1.exe"
+    binary = output / "bin" / EXECUTABLE
     if not binary.is_file() or (binary.parent / "stockfish.exe").exists():
         raise RuntimeError("Candidate must contain the engine without a bundled Stockfish")
     if stockfish:
@@ -187,20 +289,23 @@ def finalize_candidate(output, stockfish=None):
         "Stockfish, model weights, and unverified logos are excluded.\n", encoding="utf-8")
     write_manifest(output, manifest)
     verify_manifest(output)
-    bundle = output.parent / "praj-2.1.0-rc.1-windows-x64.zip"
-    with zipfile.ZipFile(bundle, "x", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(output.rglob("*")):
-            if path.is_file():
-                archive.write(path, "praj-2.1/" + path.relative_to(output).as_posix())
+    bundle = output.parent / f"praj-{RELEASE_VERSION}-windows-x64.zip"
+    sources = output.parent / SOURCES_NAME
+    write_runtime_archive(output, bundle)
+    inspect_runtime(bundle)
+    write_developer_archive(output, sources, manifest)
+    verify_developer_archive(sources)
     with tempfile.TemporaryDirectory(prefix="release-extract-", dir=ROOT / "dist") as folder:
         with zipfile.ZipFile(bundle) as archive:
             archive.extractall(folder)
-        extracted = Path(folder) / "praj-2.1"
-        verify_manifest(extracted)
-        protocol_check(extracted / "bin" / "praj_mcts_2_1.exe")
-    checksum = bundle.with_suffix(".zip.sha256")
-    checksum.write_text(f"{sha256(bundle)}  {bundle.name}\n", encoding="ascii")
+        extracted = Path(folder)
+        if sha256(extracted / EXECUTABLE) != sha256(binary):
+            raise RuntimeError("Extracted executable checksum does not match")
+        protocol_check(extracted / EXECUTABLE)
+    checksum = output.parent / f"praj-{RELEASE_VERSION}-SHA256SUMS.txt"
+    checksum.write_text("".join(f"{sha256(path)}  {path.name}\n" for path in (bundle, sources)), encoding="ascii")
     print(bundle)
+    print(sources)
     print(checksum)
 
 
@@ -231,7 +336,7 @@ def main():
     if args.binary:
         work = Path(tempfile.mkdtemp(prefix="release-build-", dir=ROOT / "dist"))
         subprocess.run([sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm",
-                        "--onefile", "--noupx", "--name", "praj_mcts_2_1",
+                        "--onefile", "--noupx", "--name", "praj",
                         "--exclude-module", "torch", "--copy-metadata", "chess",
                         "--copy-metadata", "numpy", "--distpath", str(output / "bin"),
                         "--workpath", str(work / "work"), "--specpath", str(work),

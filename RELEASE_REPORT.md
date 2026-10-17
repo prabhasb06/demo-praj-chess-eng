@@ -21,3 +21,13 @@ The release asset's `VALIDATION.md` records the fresh binary's protocol results,
 ## Remaining product limitations
 
 This is a release candidate. Absolute Elo is uncalibrated; long tournament validation and trained model weights are outside this release. The main UCI engine uses Stockfish advice when configured and static fallback otherwise. The Windows executable is unsigned, and the local native-binary validation does not certify other operating systems or CPU architectures.
+
+## RC2 usability revision
+
+- Split the Windows download from corresponding source/build records. The runnable ZIP opens directly to `praj.exe`, `README.txt`, and `licenses/`; no additional archive extraction is required.
+- Kept full matching project/dependency sources in a separate free download on the same release page, with a direct link from the Windows README. Project source files are already expanded within that developer download.
+- Added a one-line `Praj 2.1 by Prabhas` startup banner and corrected the UCI author. Backend status is emitted as a standard `info string` during search rather than as a startup warning.
+- Added explicit `help` and `d` commands, with plain-text instructions and an ASCII board. Normal UCI traffic retains its protocol format and uses no terminal escape sequences.
+- Added regression coverage for the runtime ZIP layout, separate complete sources, startup identity, help, and board display. The final assets are validated again after extraction before publication.
+
+RC2 local source checks: **65 tests run, 54 passed, 11 optional PyTorch tests skipped**. The alpha-beta smoke checks still pass **24/24**. The UCI suite now includes **16 checks** per evaluator configuration, including the new startup/help checks.

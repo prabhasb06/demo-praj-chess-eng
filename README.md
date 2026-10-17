@@ -4,6 +4,12 @@ A Python UCI engine combining MCTS move selection with Stockfish policy/value ad
 
 ## Run
 
+For Windows, download the **windows-x64.zip** asset from [GitHub Releases](https://github.com/prabhasb06/demo-praj-chess-eng/releases). Extract it once and run `praj.exe`, or select it as a UCI engine in a chess GUI. The ZIP opens directly to `praj.exe`, `README.txt`, and `licenses/`. The separate **sources.zip** download is for developers and is not needed to run the engine.
+
+The terminal opens with `Praj 2.1 by Prabhas`. Enter `help` for commands, `d` for the board, or `uci` for the standard chess-GUI handshake.
+
+To run from Python source:
+
 Use Python 3.11 or later:
 
 ```powershell
@@ -11,7 +17,7 @@ python -m pip install -r requirements-engine.txt
 python main.py
 ```
 
-See [RELEASE.md](RELEASE.md) for the pinned Windows build recipe, source packaging, and release limitations. Executables under `dist/` are build artifacts rather than tracked source. A separately obtained Stockfish executable can be configured through `StockfishPath`. Release bundles include the source, matching dependency sources, licenses, and a hash manifest alongside the executable.
+See [RELEASE.md](RELEASE.md) for the pinned Windows build recipe, source packaging, and release limitations. Executables under `dist/` are build artifacts rather than tracked source. A separately obtained Stockfish executable can be configured through `StockfishPath`. Licenses accompany the Windows executable; complete matching project/dependency sources, build records, and test logs are available in the separate source download on the same release page.
 
 On other platforms, put the matching native Stockfish executable at `stockfish.exe` beside the Python source (the filename is historical), or set the UCI `StockfishPath` option to its absolute path. Linux CI is configured, but this audit was executed on Windows.
 
@@ -52,7 +58,7 @@ python alpha_beta.py
 The audit used an isolated `.venv-audit` with CPU PyTorch. Without PyTorch, neural tests explicitly skip. `python test_uci.py` runs the protocol suite. To test a packaged build:
 
 ```powershell
-$env:PRAJ_ENGINE_EXE = "$PWD\dist\praj_mcts_2_1.exe"
+$env:PRAJ_ENGINE_EXE = 'C:\path\to\extracted\praj.exe'
 python -m unittest test_audit.AuditProtocol -v
 ```
 

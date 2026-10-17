@@ -11,6 +11,7 @@ import chess
 import numpy as np
 
 from board_encoder import decode_move
+from engine_info import NAME, VERSION, AUTHOR
 from difficulty import DifficultyController, select_move_with_variety
 from mcts import MCTS, StockfishEvaluator, uci_print
 
@@ -133,6 +134,7 @@ class UciEngine:
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.evaluator = None
         self.mcts = None
+        self.backend_notice = None
         self.pending = self.pool.submit(self.initialize)
 
     def initialize(self):
@@ -140,6 +142,21 @@ class UciEngine:
             self.evaluator.close()
         self.evaluator = StockfishEvaluator(self.path)
         self.mcts = MCTS(self.evaluator)
+        self.backend_notice = None
+
+    def report_backend(self, job):
+        """Report evaluator changes during search, without startup diagnostics."""
+        engine = self.evaluator.engine
+        assisted = engine is not None and engine.proc is not None and engine.proc.poll() is None
+        state = "stockfish" if assisted else "static"
+        with self.lock:
+            if job.superseded or self.backend_notice == state:
+                return
+            if assisted:
+                uci_print("info string Evaluation: Stockfish-assisted MCTS")
+            else:
+                uci_print("info string Evaluation: static fallback; configure StockfishPath for assisted play")
+            self.backend_notice = state
 
     def supersede(self):
         with self.lock:
@@ -181,6 +198,7 @@ class UciEngine:
         best = legal[0] if legal else chess.Move.null()
         root = None
         try:
+            self.report_backend(job)
             if legal and not job.stop.is_set():
                 params = job.params
                 budget, infinite = parse_time_from_go(job.tokens, job.board, params.max_think_time)
@@ -235,14 +253,36 @@ class UciEngine:
             return True
         command = tokens[0]
         if command == "uci":
-            uci_print("id name Praj MCTS v2.1")
-            uci_print("id author Praj")
+            uci_print(f"id name {NAME} {VERSION}")
+            uci_print(f"id author {AUTHOR}")
             uci_print("option name Difficulty type spin default 10 min 1 max 10")
             uci_print("option name MoveVariety type check default false")
             uci_print("option name Ponder type check default false")
             uci_print("option name StockfishPath type string default stockfish.exe")
             uci_print("option name Clear Hash type button")
             uci_print("uciok")
+        elif command == "help":
+            uci_print(f"{NAME} is a UCI chess engine by {AUTHOR}.")
+            uci_print("Use a chess GUI for a graphical board, or enter UCI commands below.")
+            uci_print("  uci                       Show identity and available options")
+            uci_print("  isready                   Check engine readiness")
+            uci_print("  position startpos         Set the starting position")
+            uci_print("  position startpos moves e2e4 e7e5")
+            uci_print("  go movetime 1000          Search for one second")
+            uci_print("  stop                      Stop the current search")
+            uci_print("  d                         Display the current board and FEN")
+            uci_print("  setoption name StockfishPath value C:\\path\\to\\stockfish.exe")
+            uci_print("  quit                      Exit the engine")
+        elif command == "d":
+            border = "  +---+---+---+---+---+---+---+---+"
+            rows = [border]
+            for rank in range(7, -1, -1):
+                pieces = [self.board.piece_at(chess.square(file, rank)) for file in range(8)]
+                rows.append(str(rank + 1) + " | " + " | ".join(
+                    piece.symbol() if piece else " " for piece in pieces) + " |")
+                rows.append(border)
+            rows.extend(("    a   b   c   d   e   f   g   h", "", "Fen: " + self.board.fen()))
+            uci_print("\n".join(rows))
         elif command == "isready":
             # Ready must wait for configuration, but never wait for an active search.
             self.pending.add_done_callback(lambda future: uci_print("readyok"))
@@ -310,6 +350,7 @@ class UciEngine:
 
 
 def main():
+    uci_print(f"{NAME} {VERSION} by {AUTHOR}")
     engine = UciEngine()
     try:
         for line in sys.stdin:
