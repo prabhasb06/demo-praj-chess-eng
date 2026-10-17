@@ -20,6 +20,12 @@ class ReleaseChecks(unittest.TestCase):
         (output / "bin" / EXECUTABLE).write_bytes(b"example binary")
         (output / "licenses").mkdir()
         (output / "licenses" / "example.txt").write_text("dependency notice")
+        (output / "engines").mkdir()
+        (output / "engines" / "stockfish.exe").write_bytes(b"official backend fixture")
+        sf_notice = output / "licenses" / "Stockfish"
+        sf_notice.mkdir()
+        for name in ("Copying.txt", "AUTHORS", "ORIGIN.json"):
+            (sf_notice / name).write_text("notice fixture")
         for name in ("LICENSE", "COPYING", "THIRD_PARTY_NOTICES.md"):
             (output / name).write_text("license fixture")
 
@@ -45,10 +51,21 @@ class ReleaseChecks(unittest.TestCase):
             names = inspect_runtime(bundle)
             self.assertIn(EXECUTABLE, names)
             self.assertEqual({name.split("/")[0] for name in names},
-                             {EXECUTABLE, "README.txt", "licenses"})
+                             {EXECUTABLE, "README.txt", "engines", "licenses"})
+            self.assertIn("engines/stockfish.exe", names)
             self.assertFalse(any(name.endswith(".zip") for name in names))
             with zipfile.ZipFile(bundle) as archive:
                 self.assertIn(SOURCES_URL, archive.read("README.txt").decode())
+
+    def test_runtime_archive_requires_the_assisted_backend(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "incomplete.zip"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr(EXECUTABLE, b"example")
+                archive.writestr("README.txt", SOURCES_URL)
+                archive.writestr("licenses/COPYING.txt", "GPL")
+            with self.assertRaises(RuntimeError):
+                inspect_runtime(path)
 
     def test_developer_download_contains_expanded_project_source(self):
         with tempfile.TemporaryDirectory() as folder:

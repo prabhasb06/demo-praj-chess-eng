@@ -11,9 +11,9 @@ The original project code retains the MIT grant in `LICENSE`; the complete appli
 
 ## Separate programs and assets
 
-- **Stockfish** — An optional external UCI engine, not tracked in this repository. The official project is GPLv3: <https://github.com/official-stockfish/Stockfish>. If a release bundles a Stockfish binary, include the matching license and comply with the source/corresponding-source requirements for that exact binary. A compatible system-installed Stockfish is a separate deployment choice.
+- **Stockfish 18** — The Windows ZIP now includes the unmodified official baseline x64 binary as `engines/stockfish.exe`, automatically selected by Praj. The precise upstream archive URL, source commit, and checksum are recorded in `stockfish.lock.json` and `licenses/Stockfish/ORIGIN.json`. Stockfish's GPL text, authors, and upstream README accompany it. Its exact source code and both NNUE network files are supplied in the corresponding-source ZIP. Upstream: <https://github.com/official-stockfish/Stockfish/releases/tag/sf_18>. Praj does not claim Stockfish's name, authorship, or Elo.
 - **Logo files** — `logo.png` and `stockfish_logo.png` have unverified provenance and remain in historical project files. They are unused by the engine and excluded from source release archives through `.gitattributes`; the binary recipe does not include them. They are not covered by this release's licensing claims.
-- **Model weights** — No trained checkpoint or weight file is tracked or published. Therefore this repository is not currently an open-weight model release.
+- **Model weights** — No independently trained Praj checkpoint is published. Stockfish 18's two NNUE networks are embedded in its bundled executable. Their exact exported data and full hashes are included in the corresponding-source download; these are Stockfish networks, not a trained Praj model. Preserve Stockfish's upstream licensing and neural-data acknowledgements.
 
 ## Project license
 

@@ -31,3 +31,13 @@ This is a release candidate. Absolute Elo is uncalibrated; long tournament valid
 - Added regression coverage for the runtime ZIP layout, separate complete sources, startup identity, help, and board display. The final assets are validated again after extraction before publication.
 
 RC2 local source checks: **65 tests run, 54 passed, 11 optional PyTorch tests skipped**. The alpha-beta smoke checks still pass **24/24**. The UCI suite now includes **16 checks** per evaluator configuration, including the new startup/help checks.
+
+## RC3 ready-to-run assistance
+
+- Bundled the checksum-verified official Stockfish 18 baseline x64 executable in `engines/`; no separate backend/model download or path command is needed.
+- Added application-relative backend discovery so launching from a chess GUI's unrelated directory still selects the bundled evaluator.
+- Preserved upstream license/authors/source and exported both embedded NNUE files with verified hashes into the corresponding-source package. Neither the binary nor the networks are modified.
+- Added extracted-package integration checks proving automatic assisted play and matching official provenance. CI now finalizes and tests the complete download, including this setup-free assisted path.
+- Kept the single-extraction runtime layout and separated developer files. This remains a Stockfish-assisted engine with uncalibrated Praj Elo and no independently trained Praj checkpoint.
+
+RC3 local source suite: **67 tests run, 56 passed, 11 optional PyTorch tests skipped**. The exact official backend and both exported network hashes were verified. One standalone smoke-test run exceeded its wall-time threshold (54.810s for depth 3); an isolated rerun passed **24/24**, with depth 3 taking **0.655s**. No search/evaluation code was changed for that timing observation; CI and extracted-package checks independently gate publication.

@@ -109,6 +109,12 @@ def _parse_setoption(tokens):
     return " ".join(lower[start:end]), " ".join(tokens[end + 1:]) if end < len(tokens) else None
 
 
+def default_stockfish_path(base):
+    """Resolve relative to the application, independently of a GUI's directory."""
+    bundled = os.path.join(base, "engines", "stockfish.exe")
+    return bundled if os.path.isfile(bundled) else os.path.join(base, "stockfish.exe")
+
+
 @dataclass
 class SearchJob:
     board: chess.Board
@@ -125,7 +131,7 @@ class SearchJob:
 class UciEngine:
     def __init__(self):
         base = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else __file__)
-        self.path = os.path.join(base, "stockfish.exe")
+        self.path = default_stockfish_path(base)
         self.difficulty = DifficultyController(10)
         self.variety = False
         self.board = chess.Board()
@@ -258,7 +264,7 @@ class UciEngine:
             uci_print("option name Difficulty type spin default 10 min 1 max 10")
             uci_print("option name MoveVariety type check default false")
             uci_print("option name Ponder type check default false")
-            uci_print("option name StockfishPath type string default stockfish.exe")
+            uci_print(f"option name StockfishPath type string default {self.path}")
             uci_print("option name Clear Hash type button")
             uci_print("uciok")
         elif command == "help":

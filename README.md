@@ -4,7 +4,7 @@ A Python UCI engine combining MCTS move selection with Stockfish policy/value ad
 
 ## Run
 
-For Windows, download the **windows-x64.zip** asset from [GitHub Releases](https://github.com/prabhasb06/demo-praj-chess-eng/releases). Extract it once and run `praj.exe`, or select it as a UCI engine in a chess GUI. The ZIP opens directly to `praj.exe`, `README.txt`, and `licenses/`. The separate **sources.zip** download is for developers and is not needed to run the engine.
+For Windows, download the **windows-x64.zip** asset from [GitHub Releases](https://github.com/prabhasb06/demo-praj-chess-eng/releases). Extract it once and run `praj.exe`, or select it as a UCI engine in a chess GUI. The ZIP contains `praj.exe`, `README.txt`, `engines/`, and `licenses/`. Official Stockfish 18 and its embedded neural networks are included and selected automatically; users need no separate Python installation, Stockfish download, network connection, or path configuration. Keep the complete extracted folder together. The separate **sources.zip** is for developers.
 
 The terminal opens with `Praj 2.1 by Prabhas`. Enter `help` for commands, `d` for the board, or `uci` for the standard chess-GUI handshake.
 
@@ -17,7 +17,7 @@ python -m pip install -r requirements-engine.txt
 python main.py
 ```
 
-See [RELEASE.md](RELEASE.md) for the pinned Windows build recipe, source packaging, and release limitations. Executables under `dist/` are build artifacts rather than tracked source. A separately obtained Stockfish executable can be configured through `StockfishPath`. Licenses accompany the Windows executable; complete matching project/dependency sources, build records, and test logs are available in the separate source download on the same release page.
+See [RELEASE.md](RELEASE.md) for the pinned Windows build recipe, source packaging, and release limitations. Executables under `dist/` are build artifacts rather than tracked source. `StockfishPath` remains available for an advanced backend override. Licenses accompany the Windows executables; complete matching project/dependency/Stockfish sources, exact neural-network data, build records, and test logs are available in the separate source download on the same release page.
 
 On other platforms, put the matching native Stockfish executable at `stockfish.exe` beside the Python source (the filename is historical), or set the UCI `StockfishPath` option to its absolute path. Linux CI is configured, but this audit was executed on Windows.
 
@@ -28,7 +28,7 @@ On other platforms, put the matching native Stockfish executable at `stockfish.e
 | Difficulty | 10 | Parameter preset, range 1–10; **not a calibrated Elo rating** |
 | MoveVariety | false | Enable temperature, exploration noise and configured blunder probabilities |
 | Ponder | false | Standard GUI capability option; actual pondering starts only with `go ponder` |
-| StockfishPath | stockfish.exe | Local evaluator executable |
+| StockfishPath | Automatically resolved | Bundled `engines/stockfish.exe`; advanced override available |
 | Clear Hash | button | Clear evaluation caches between searches |
 
 Supports `position startpos/fen ... moves ...`, `movetime`, clock/increment allocation, `depth`, `nodes`, `mate`, `searchmoves`, `infinite`, `stop`, `ponderhit`, `ucinewgame`, `isready` and `quit`.
@@ -82,4 +82,4 @@ The C++ file is a nonfunctional reference sketch, excluded from CMake by default
 
 Praj is the engine name; Prabhas is the author, and development used AI-generated code. The project's original code retains the MIT grant in [LICENSE](LICENSE). The complete application incorporating `python-chess` is distributed under GPL-3.0-or-later; see [COPYING](COPYING) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Preserve both the MIT notice and applicable dependency notices when redistributing it.
 
-No trained model checkpoint/weights are currently published. The model format and training code are present, but this is not yet an open-weight release. The UCI engine uses Stockfish-guided MCTS or static fallback, rather than a trained neural checkpoint. The unverified logo files are excluded from source release archives and binary bundles.
+No independently trained Praj checkpoint is published. The default assisted mode uses Stockfish 18's two embedded NNUE networks, whose exact data is also included in the matching source download. Praj's own neural-model architecture/training code remains separate from the released UCI path. The unverified logo files are excluded from source release archives and binary bundles.

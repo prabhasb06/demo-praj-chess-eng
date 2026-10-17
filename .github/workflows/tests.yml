@@ -37,3 +37,8 @@ jobs:
         run: |
           $env:PRAJ_ENGINE_EXE = (Get-ChildItem dist/release-2.1-*/bin/praj.exe).FullName
           .\.venv-release\Scripts\python.exe -m unittest test_audit.AuditProtocol -v
+      - name: Validate automatic assistance in the extracted download
+        shell: pwsh
+        run: |
+          $candidate = (Get-ChildItem dist/release-2.1-*/manifest.json).Directory.FullName
+          .\.venv-release\Scripts\python.exe prepare_release.py --finalize $candidate

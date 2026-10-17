@@ -17,7 +17,8 @@ from board_encoder import (POLICY_SIZE, encode_move, decode_move, encode_move_fo
                            decode_move_for_perspective, get_legal_move_mask)
 from mcts import MCTS, StockfishEvaluator, MCTSNode
 from engine_info import NAME, VERSION, AUTHOR
-from uci_engine import parse_position, parse_time_from_go, _num
+from uci_engine import parse_position, parse_time_from_go, _num, default_stockfish_path
+import tempfile
 
 REPO = pathlib.Path(__file__).parent
 
@@ -33,6 +34,17 @@ class StaticEvaluator:
 
 
 class AuditCore(unittest.TestCase):
+    def test_bundled_evaluator_discovery_is_application_relative(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = pathlib.Path(folder)
+            legacy = base / "stockfish.exe"
+            self.assertEqual(default_stockfish_path(folder), str(legacy))
+            legacy.write_bytes(b"legacy")
+            bundled = base / "engines" / "stockfish.exe"
+            bundled.parent.mkdir()
+            bundled.write_bytes(b"bundled")
+            self.assertEqual(default_stockfish_path(folder), str(bundled))
+
     def test_underpromotions_roundtrip_both_colors(self):
         for fen in ("8/P7/8/8/8/8/7p/4K2k w - - 0 1",
                     "4k2K/7P/8/8/8/8/p7/8 b - - 0 1"):
@@ -193,9 +205,9 @@ class AuditCore(unittest.TestCase):
 
 
 class Session:
-    def __init__(self):
+    def __init__(self, cwd=None):
         argv = [os.environ['PRAJ_ENGINE_EXE']] if os.environ.get('PRAJ_ENGINE_EXE') else [sys.executable, str(REPO / "uci_engine.py")]
-        self.proc = subprocess.Popen(argv,
+        self.proc = subprocess.Popen(argv, cwd=cwd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         self.lines = queue.Queue()
         self.reader = threading.Thread(target=self.read, daemon=True)

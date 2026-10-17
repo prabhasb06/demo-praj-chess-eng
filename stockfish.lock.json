@@ -1,0 +1,10 @@
+{
+  "version": "18",
+  "tag": "sf_18",
+  "commit": "cb3d4ee9b47d0c5aae855b12379378ea1439675c",
+  "architecture": "x86-64 (baseline; no AVX2 requirement)",
+  "url": "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-windows-x86-64.zip",
+  "archive_sha256": "40cc975817e7eee270b03f354810d20956df565420d320f6dd37d454dc81a139",
+  "binary_entry": "stockfish/stockfish-windows-x86-64.exe",
+  "source_prefix": "stockfish/"
+}
