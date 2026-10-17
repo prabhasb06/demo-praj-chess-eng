@@ -24,7 +24,13 @@ The last command prints a unique output directory under `dist`. It creates the s
 
 The bundle contains no Stockfish executable. In a chess GUI, set the engine's `StockfishPath` to a separately obtained native Stockfish executable for assisted strength. Without it, the static evaluator provides legal play with substantially reduced, uncalibrated strength. Obtain Stockfish from <https://stockfishchess.org/download/> and retain its license/source information if redistributing it separately.
 
-Test the freshly built binary first without a backend, then with a known compatible Stockfish. Replace the example paths with the printed output directory and your Stockfish path:
+Finalize the printed candidate directory before publishing it. This verifies every hash, tests the packaged executable without Stockfish and optionally with a known external Stockfish, produces the complete ZIP/checksum, extracts that ZIP, and repeats manifest and fallback UCI checks against the extracted executable:
+
+```powershell
+.\.venv-release\Scripts\python.exe prepare_release.py --finalize dist\release-2.1-EXAMPLE --stockfish C:\path\to\stockfish.exe
+```
+
+For individual protocol checks, replace the example paths with the printed output directory and your Stockfish path:
 
 ```powershell
 $env:PRAJ_ENGINE_EXE = 'C:\path\to\release\bin\praj_mcts_2_1.exe'

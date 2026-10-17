@@ -1,17 +1,20 @@
 """Checks for release boundaries and the clean-source requirement (stdlib only)."""
 from pathlib import Path
+import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
 
-from prepare_release import VERSION, clean_commit, inspect_source, sha256
+from prepare_release import ROOT, VERSION, clean_commit, inspect_source, sha256, write_manifest
 
 
 class ReleaseChecks(unittest.TestCase):
     def make_archive(self, path, extra=(), missing=()):
         with zipfile.ZipFile(path, "w") as archive:
-            for name in ("main.py", "LICENSE", "RELEASE.md", "requirements-release.txt", *extra):
+            for name in ("main.py", "LICENSE", "COPYING", "RELEASE.md", "requirements-release.txt", *extra):
                 if name not in missing:
                     archive.writestr(f"praj-{VERSION}/" + name, "example")
 
@@ -19,7 +22,7 @@ class ReleaseChecks(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "source.zip"
             self.make_archive(path)
-            self.assertEqual(inspect_source(path), 4)
+            self.assertEqual(inspect_source(path), 5)
             self.assertEqual(len(sha256(path)), 64)
 
     def test_rejects_unverified_assets_and_binaries(self):
@@ -37,6 +40,26 @@ class ReleaseChecks(unittest.TestCase):
             self.make_archive(path, missing=("LICENSE",))
             with self.assertRaises(RuntimeError):
                 inspect_source(path)
+
+    def test_refresh_manifest_does_not_hash_itself(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            (output / "payload").write_bytes(b"content")
+            write_manifest(output, {"version": VERSION})
+            write_manifest(output, {"version": VERSION})
+            manifest = json.loads((output / "manifest.json").read_text())
+            self.assertNotIn("manifest.json", manifest["sha256"])
+            self.assertEqual(manifest["sha256"]["payload"], sha256(output / "payload"))
+
+    def test_alpha_beta_smoke_on_legacy_windows_output_encoding(self):
+        env = dict(os.environ, PYTHONIOENCODING="cp1252")
+        result = subprocess.run([sys.executable, str(ROOT / "alpha_beta.py")],
+                                capture_output=True, env=env, timeout=30)
+        # This regression checks console compatibility. The separate alpha_beta.py
+        # CI step gates its chess assertions and machine-dependent timing limits.
+        diagnostics = (result.stdout + result.stderr).decode("cp1252", errors="replace")
+        self.assertIn(b"Results:", result.stdout, diagnostics)
+        self.assertNotIn(b"UnicodeEncodeError", result.stderr, diagnostics)
 
     def test_git_exports_omit_artwork_and_reject_dirty_checkout(self):
         with tempfile.TemporaryDirectory() as folder:

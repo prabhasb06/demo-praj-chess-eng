@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.metadata as metadata
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -44,7 +45,7 @@ def inspect_source(path):
                     or ".git" in item.parts or "__pycache__" in item.parts):
                 raise RuntimeError(f"Unexpected release archive entry: {name}")
         prefix = f"praj-{VERSION}/"
-        for required in ("main.py", "LICENSE", "RELEASE.md", "requirements-release.txt"):
+        for required in ("main.py", "LICENSE", "COPYING", "RELEASE.md", "requirements-release.txt"):
             if prefix + required not in names:
                 raise RuntimeError(f"Missing source release file: {required}")
     return len(names)
@@ -133,15 +134,87 @@ def sha256(path):
 def write_manifest(output, manifest):
     manifest["sha256"] = {
         path.relative_to(output).as_posix(): sha256(path)
-        for path in sorted(output.rglob("*")) if path.is_file()
+        for path in sorted(output.rglob("*")) if path.is_file() and path.name != "manifest.json"
     }
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def verify_manifest(output):
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    actual = {path.relative_to(output).as_posix() for path in output.rglob("*")
+              if path.is_file() and path.name != "manifest.json"}
+    if actual != set(manifest["sha256"]):
+        raise RuntimeError("Release file inventory does not match manifest")
+    for name, expected in manifest["sha256"].items():
+        path = (output / name).resolve()
+        if not path.is_relative_to(output.resolve()) or sha256(path) != expected:
+            raise RuntimeError(f"Release checksum mismatch: {name}")
+    return manifest
+
+
+def protocol_check(binary, stockfish=None):
+    env = dict(os.environ, PRAJ_ENGINE_EXE=str(binary), OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+    env.pop("PRAJ_STOCKFISH_PATH", None)
+    if stockfish:
+        env["PRAJ_STOCKFISH_PATH"] = str(stockfish)
+    result = subprocess.run([sys.executable, "-m", "unittest", "test_audit.AuditProtocol", "-v"],
+                            cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+    if result.returncode or "skipped" in result.stderr:
+        raise RuntimeError("Packaged UCI checks failed:\n" + result.stdout + result.stderr)
+    return result.stdout + result.stderr
+
+
+def finalize_candidate(output, stockfish=None):
+    output = output.resolve()
+    if not output.is_relative_to((ROOT / "dist").resolve()):
+        raise RuntimeError("Finalize a candidate directory inside this project's dist directory")
+    manifest = verify_manifest(output)
+    if manifest["commit"] != clean_commit():
+        raise RuntimeError("Candidate must match the current clean source commit")
+    binary = output / "bin" / "praj_mcts_2_1.exe"
+    if not binary.is_file() or (binary.parent / "stockfish.exe").exists():
+        raise RuntimeError("Candidate must contain the engine without a bundled Stockfish")
+    if stockfish:
+        stockfish = stockfish.resolve(strict=True)
+    (output / "validation-fallback.txt").write_text(protocol_check(binary), encoding="utf-8")
+    if stockfish:
+        (output / "validation-stockfish.txt").write_text(protocol_check(binary, stockfish), encoding="utf-8")
+    (output / "VALIDATION.md").write_text(
+        "# Packaged-engine validation\n\n"
+        "The fresh executable passed the complete UCI protocol suite without Stockfish.\n"
+        + ("It also passed with an explicitly configured external Stockfish.\n" if stockfish else "")
+        + "\nSee validation logs for individual checks, and manifest.json for build/source hashes.\n"
+        "Stockfish, model weights, and unverified logos are excluded.\n", encoding="utf-8")
+    write_manifest(output, manifest)
+    verify_manifest(output)
+    bundle = output.parent / "praj-2.1.0-rc.1-windows-x64.zip"
+    with zipfile.ZipFile(bundle, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(output.rglob("*")):
+            if path.is_file():
+                archive.write(path, "praj-2.1/" + path.relative_to(output).as_posix())
+    with tempfile.TemporaryDirectory(prefix="release-extract-", dir=ROOT / "dist") as folder:
+        with zipfile.ZipFile(bundle) as archive:
+            archive.extractall(folder)
+        extracted = Path(folder) / "praj-2.1"
+        verify_manifest(extracted)
+        protocol_check(extracted / "bin" / "praj_mcts_2_1.exe")
+    checksum = bundle.with_suffix(".zip.sha256")
+    checksum.write_text(f"{sha256(bundle)}  {bundle.name}\n", encoding="ascii")
+    print(bundle)
+    print(checksum)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", action="store_true", help="Also build a local Windows candidate")
+    parser.add_argument("--finalize", type=Path, help="Validate and ZIP an existing candidate directory")
+    parser.add_argument("--stockfish", type=Path, help="External Stockfish for optional assisted validation")
     args = parser.parse_args()
+    if args.finalize:
+        if args.binary:
+            parser.error("--binary and --finalize are separate steps")
+        finalize_candidate(args.finalize, args.stockfish)
+        return
     commit = clean_commit()
     if args.binary:
         require_isolated_environment()

@@ -1,4 +1,4 @@
-# Release preparation report — 16 October 2026
+# Release preparation report — 17 October 2026
 
 ## Findings and fixes
 
@@ -8,11 +8,13 @@
 - Logo provenance was unresolved. Both unused logo files are excluded from release archives and binary bundles while their originals remain preserved in project history/files.
 - The complete distribution's terms were unclear. Original code retains MIT; the combined application uses GPL-3.0-or-later, with the full GPL text and corresponding dependency sources supplied beside the binary.
 - CI covered only Linux source execution. Added Windows packaging and packaged-UCI validation, while retaining the Linux neural/source suite.
+- The new Windows CI exposed a real console-encoding crash in the standalone alpha-beta smoke test. Replaced its Unicode output with ASCII, added a regression check using the legacy Windows encoding, and made failed self-tests return a nonzero exit code.
+- Refreshing a release inventory could accidentally hash the previous inventory itself. Excluded that file from its own hashes and added a regression check; source validation now also requires the full GPL text.
 - Updated the README to explain the build process, author/engine attribution, actual evaluator behavior, and explicit limitations.
 
 ## Validation
 
-Fresh Windows x86-64 CPython 3.13.14 environment using `requirements-release.txt`: **59 tests run, 48 passed, 11 optional PyTorch tests skipped**. All 14 source UCI tests ran; none were skipped for missing Stockfish. Standalone alpha-beta self-test: **24/24 passed**. Four new packaging tests cover archive boundaries, required files, Git export rules, and dirty-checkout rejection.
+Fresh Windows x86-64 CPython 3.13.14 environment using `requirements-release.txt`: **61 tests run, 50 passed, 11 optional PyTorch tests skipped**. All 14 source UCI tests ran; none were skipped for missing Stockfish. Standalone alpha-beta self-test: **24/24 passed**, including a regression run using legacy Windows console encoding. Six new packaging tests cover archive boundaries, required files, Git export rules, dirty-checkout rejection, manifest refresh, and console compatibility.
 
 The release asset's `VALIDATION.md` records the fresh binary's protocol results, bundle verification, and backend configurations. `manifest.json` records the exact source commit, build packages, matching dependency-source hashes, and file hashes. Remote CI results must be checked separately; a local pass does not claim that GitHub Actions has completed.
 

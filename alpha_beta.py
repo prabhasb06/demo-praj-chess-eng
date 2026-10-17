@@ -715,7 +715,7 @@ if __name__ == "__main__":
     import time
 
     print("=" * 60)
-    print("Alpha-Beta Engine — Self-Test Suite")
+    print("Alpha-Beta Engine - Self-Test Suite")
     print("=" * 60)
 
     passed = 0
@@ -744,7 +744,7 @@ if __name__ == "__main__":
     # White up a queen
     b = chess.Board("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
     score = evaluate_board(b)
-    _test("White up a queen → positive score", score > 800, f"score={score}")
+    _test("White up a queen -> positive score", score > 800, f"score={score}")
 
     # --- Test 3: Mate in 1 ---
     print("\n--- Mate in 1 ---")
@@ -863,6 +863,7 @@ if __name__ == "__main__":
     print("=" * 60)
 
     if failed > 0:
-        print("\n⚠  Some tests failed — review output above.")
+        print("\nSome tests failed - review output above.")
     else:
-        print("\n✓  All tests passed!")
+        print("\nAll tests passed!")
+    raise SystemExit(1 if failed else 0)
